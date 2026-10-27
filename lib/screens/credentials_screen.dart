@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:otp/otp.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/attendance_service.dart';
@@ -16,7 +18,9 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
   late TextEditingController _domainCtrl;
   late TextEditingController _userCtrl;
   late TextEditingController _passCtrl;
-  late TextEditingController _mfaCtrl;
+  late TextEditingController _totpSecretCtrl;
+  String _liveTotp = '';          // live 6-digit preview
+  bool _obscureSecret = true;
 
   bool _obscurePass = true;
   bool _saving = false;
@@ -52,8 +56,10 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     _userCtrl = TextEditingController(text: seedEmail);
     _passCtrl = TextEditingController(
         text: widget.prefs.getString(PrefKeys.password) ?? '');
-    _mfaCtrl = TextEditingController(
-        text: widget.prefs.getString(PrefKeys.mfaCode) ?? '');
+    _totpSecretCtrl = TextEditingController(
+        text: widget.prefs.getString(PrefKeys.totpSecret) ?? '');
+    _totpSecretCtrl.addListener(_updateLiveTotp);
+    _updateLiveTotp();
   }
 
   @override
@@ -61,8 +67,27 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     _domainCtrl.dispose();
     _userCtrl.dispose();
     _passCtrl.dispose();
-    _mfaCtrl.dispose();
+    _totpSecretCtrl.dispose();
     super.dispose();
+  }
+
+  void _updateLiveTotp() {
+    final secret = _totpSecretCtrl.text.trim().replaceAll(' ', '').toUpperCase();
+    if (secret.isEmpty) {
+      setState(() => _liveTotp = '');
+      return;
+    }
+    try {
+      final code = OTP.generateTOTPCodeString(
+        secret,
+        DateTime.now().millisecondsSinceEpoch,
+        algorithm: Algorithm.SHA1,
+        isGoogle: true,
+      );
+      setState(() => _liveTotp = code);
+    } catch (_) {
+      setState(() => _liveTotp = 'Invalid secret');
+    }
   }
 
   Future<void> _save() async {
@@ -73,7 +98,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
       domain: _domainCtrl.text,
       username: _userCtrl.text,
       password: _passCtrl.text,
-      mfaCode: _mfaCtrl.text.trim(),
+      totpSecret: _totpSecretCtrl.text,
     );
 
     setState(() {
@@ -96,7 +121,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
       domain: _domainCtrl.text,
       username: _userCtrl.text,
       password: _passCtrl.text,
-      mfaCode: _mfaCtrl.text.trim(),
+      totpSecret: _totpSecretCtrl.text,
     );
 
     try {
@@ -237,14 +262,13 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
               ),
               const SizedBox(height: 20),
 
-              // ── MFA / Authenticator section ──────────────────────────────
+              // ── TOTP Secret section ───────────────────────────────────────
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: cs.secondaryContainer.withOpacity(0.4),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: cs.secondary.withOpacity(0.3)),
+                  border: Border.all(color: cs.secondary.withOpacity(0.3)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -262,26 +286,112 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'If your HROne account uses Google Authenticator / Authy, '
-                      'enter the current 6-digit code here before tapping Test Connection. '
-                      'The app will use this code for background punches too — '
-                      'update it here if your session token ever expires.',
+                      'Paste your TOTP secret key once — the app generates '
+                      'the 6-digit code automatically at every punch. '
+                      'Find it in Google Authenticator → Transfer accounts → Export, '
+                      'or use the QR-code scanner below.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: cs.onSecondaryContainer),
                     ),
                     const SizedBox(height: 12),
                     TextFormField(
-                      controller: _mfaCtrl,
-                      keyboardType: TextInputType.number,
-                      maxLength: 8,
-                      decoration: const InputDecoration(
-                        labelText: 'MFA Code (optional)',
-                        hintText: '6-digit code from your authenticator',
-                        prefixIcon: Icon(Icons.pin_outlined),
-                        counterText: '',
-                        border: OutlineInputBorder(),
+                      controller: _totpSecretCtrl,
+                      obscureText: _obscureSecret,
+                      decoration: InputDecoration(
+                        labelText: 'TOTP Secret Key (optional)',
+                        hintText: 'e.g. JBSWY3DPEHPK3PXP',
+                        prefixIcon: const Icon(Icons.vpn_key_outlined),
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscureSecret
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined),
+                          onPressed: () =>
+                              setState(() => _obscureSecret = !_obscureSecret),
+                        ),
                       ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                            RegExp(r'[A-Za-z2-7= ]')),
+                      ],
                     ),
+                    // Live TOTP preview
+                    if (_liveTotp.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: _liveTotp == 'Invalid secret'
+                              ? Colors.red.shade50
+                              : Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _liveTotp == 'Invalid secret'
+                                ? Colors.red.shade300
+                                : Colors.green.shade300,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _liveTotp == 'Invalid secret'
+                                  ? Icons.error_outline
+                                  : Icons.check_circle_outline,
+                              color: _liveTotp == 'Invalid secret'
+                                  ? Colors.red
+                                  : Colors.green,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _liveTotp == 'Invalid secret'
+                                  ? const Text('Invalid secret key',
+                                      style: TextStyle(color: Colors.red))
+                                  : RichText(
+                                      text: TextSpan(
+                                        style: DefaultTextStyle.of(context).style,
+                                        children: [
+                                          const TextSpan(
+                                              text: 'Current code: ',
+                                              style: TextStyle(fontSize: 12)),
+                                          TextSpan(
+                                            text: _liveTotp,
+                                            style: const TextStyle(
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.bold,
+                                              letterSpacing: 4,
+                                              color: Colors.green,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                            ),
+                            if (_liveTotp != 'Invalid secret')
+                              IconButton(
+                                icon: const Icon(Icons.copy, size: 18),
+                                tooltip: 'Copy',
+                                onPressed: () {
+                                  Clipboard.setData(
+                                      ClipboardData(text: _liveTotp));
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text('Code copied'),
+                                        duration: Duration(seconds: 1)),
+                                  );
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '✓ Compare this with your authenticator app to verify the secret is correct.',
+                        style: TextStyle(
+                            fontSize: 11, color: cs.outline),
+                      ),
+                    ],
                   ],
                 ),
               ),

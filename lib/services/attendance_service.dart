@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:otp/otp.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -36,7 +37,7 @@ class PrefKeys {
   static const activeDays = 'active_days'; // comma-separated ints: 1=Mon…7=Sun
   static const randomizeEnabled = 'randomize_enabled';
   static const randomizeMinutes = 'randomize_minutes'; // default 5
-  static const mfaCode = 'hrone_mfa_code'; // TOTP code from authenticator app
+  static const totpSecret = 'hrone_totp_secret'; // base32 secret from authenticator setup
   static const lastPunchInTime = 'last_punch_in_time';
   static const lastPunchOutTime = 'last_punch_out_time';
   static const lastPunchInStatus = 'last_punch_in_status';
@@ -64,17 +65,36 @@ class AttendanceService {
     required String domain,
     required String username,
     required String password,
-    String mfaCode = '',
+    String totpSecret = '',
   }) async {
     await _prefs.setString(PrefKeys.domain, domain.trim());
     await _prefs.setString(PrefKeys.username, username.trim());
     await _prefs.setString(PrefKeys.password, password);
-    if (mfaCode.isNotEmpty) {
-      await _prefs.setString(PrefKeys.mfaCode, mfaCode.trim());
+    if (totpSecret.isNotEmpty) {
+      // Normalize: strip spaces, uppercase (base32 is case-insensitive)
+      await _prefs.setString(
+          PrefKeys.totpSecret, totpSecret.trim().replaceAll(' ', '').toUpperCase());
     } else {
-      await _prefs.remove(PrefKeys.mfaCode);
+      await _prefs.remove(PrefKeys.totpSecret);
     }
     await _prefs.remove(PrefKeys.authToken);
+  }
+
+  /// Generates the current 6-digit TOTP code from the stored secret.
+  /// Returns empty string if no secret is saved.
+  String _currentTotp() {
+    final secret = _prefs.getString(PrefKeys.totpSecret) ?? '';
+    if (secret.isEmpty) return '';
+    try {
+      return OTP.generateTOTPCodeString(
+        secret,
+        DateTime.now().millisecondsSinceEpoch,
+        algorithm: Algorithm.SHA1,
+        isGoogle: true,
+      );
+    } catch (_) {
+      return '';
+    }
   }
 
   // ---- Active days helpers -------------------------------------------------
@@ -108,7 +128,8 @@ class AttendanceService {
     final cached = _prefs.getString(PrefKeys.authToken);
     if (cached != null && cached.isNotEmpty && !forceRefresh) return cached;
 
-    final mfaCode = _prefs.getString(PrefKeys.mfaCode) ?? '';
+    // Generate a fresh TOTP code right now from the stored secret
+    final totp = _currentTotp();
 
     final uri = Uri.parse('$_baseUrl/api/v1/auth/login');
     final body = <String, dynamic>{
@@ -116,11 +137,11 @@ class AttendanceService {
       'username': username,
       'password': password,
     };
-    // Include TOTP code if user has saved one (authenticator app flow)
-    if (mfaCode.isNotEmpty) {
-      body['mfaCode'] = mfaCode;
-      body['totpCode'] = mfaCode;
-      body['otp'] = mfaCode;
+    // Include live TOTP code if secret is configured
+    if (totp.isNotEmpty) {
+      body['mfaCode'] = totp;
+      body['totpCode'] = totp;
+      body['otp'] = totp;
     }
 
     final resp = await http
