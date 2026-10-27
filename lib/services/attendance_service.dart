@@ -191,7 +191,11 @@ class AttendanceService {
   // ---- Schedule ------------------------------------------------------------
 
   Future<void> applySchedule() async {
-    await Workmanager().cancelAll();
+    try {
+      await Workmanager().cancelAll();
+    } catch (_) {
+      // cancelAll can throw if WorkManager isn't initialized — safe to ignore
+    }
     if (!(_prefs.getBool(PrefKeys.automationEnabled) ?? false)) return;
 
     final inH = _prefs.getInt(PrefKeys.punchInHour) ?? 9;
@@ -200,23 +204,27 @@ class AttendanceService {
     final outM = _prefs.getInt(PrefKeys.punchOutMinute) ?? 0;
 
     // Schedule daily tasks — weekday & jitter checks happen inside _punch()
-    await Workmanager().registerPeriodicTask(
-      kPunchInTask,
-      kPunchInTask,
-      frequency: const Duration(hours: 24),
-      initialDelay: _delayUntil(inH, inM),
-      constraints: Constraints(networkType: NetworkType.connected),
-      existingWorkPolicy: ExistingWorkPolicy.replace,
-    );
+    try {
+      await Workmanager().registerPeriodicTask(
+        kPunchInTask,
+        kPunchInTask,
+        frequency: const Duration(hours: 24),
+        initialDelay: _delayUntil(inH, inM),
+        constraints: Constraints(networkType: NetworkType.connected),
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+      );
+    } catch (_) {}
 
-    await Workmanager().registerPeriodicTask(
-      kPunchOutTask,
-      kPunchOutTask,
-      frequency: const Duration(hours: 24),
-      initialDelay: _delayUntil(outH, outM),
-      constraints: Constraints(networkType: NetworkType.connected),
-      existingWorkPolicy: ExistingWorkPolicy.replace,
-    );
+    try {
+      await Workmanager().registerPeriodicTask(
+        kPunchOutTask,
+        kPunchOutTask,
+        frequency: const Duration(hours: 24),
+        initialDelay: _delayUntil(outH, outM),
+        constraints: Constraints(networkType: NetworkType.connected),
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+      );
+    } catch (_) {}
   }
 
   Duration _delayUntil(int hour, int minute) {

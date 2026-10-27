@@ -303,13 +303,13 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   Widget _randomnessCard(ColorScheme cs) {
     return Card(
       elevation: 0,
-      color: _randomize ? cs.tertiaryContainer.withOpacity(0.6) : cs.surfaceVariant,
+      color: _randomize ? cs.secondaryContainer.withOpacity(0.6) : cs.surfaceVariant,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         child: Row(
           children: [
-            Icon(Icons.shuffle_rounded,
-                color: _randomize ? cs.tertiary : cs.outline, size: 28),
+            Icon(Icons.shuffle,
+                color: _randomize ? cs.secondary : cs.outline, size: 28),
             const SizedBox(width: 12),
             Expanded(
               child: Column(

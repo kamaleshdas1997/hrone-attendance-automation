@@ -34,6 +34,36 @@ class _HomeScreenState extends State<HomeScreen> {
     return FutureBuilder<SharedPreferences>(
       future: _prefsFuture,
       builder: (context, snap) {
+        if (snap.hasError) {
+          // SharedPreferences failed — show error so app doesn't appear frozen
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                    const SizedBox(height: 16),
+                    const Text('Failed to load preferences',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Text(snap.error.toString(),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    const SizedBox(height: 24),
+                    ElevatedButton(
+                      onPressed: () => setState(() {
+                        _prefsFuture = SharedPreferences.getInstance();
+                      }),
+                      child: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
         if (!snap.hasData) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
