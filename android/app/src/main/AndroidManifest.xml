@@ -4,6 +4,9 @@
 
     <!-- Internet access for API calls -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Camera for QR code scanning -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <!-- Background work scheduling -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>

@@ -4,6 +4,7 @@ import 'package:otp/otp.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/attendance_service.dart';
+import 'qr_scanner_screen.dart';
 
 class CredentialsScreen extends StatefulWidget {
   final SharedPreferences prefs;
@@ -294,6 +295,30 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                           color: cs.onSecondaryContainer),
                     ),
                     const SizedBox(height: 12),
+                    // QR scan button
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('Scan QR Code from HROne MFA Setup'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          side: BorderSide(color: cs.secondary),
+                          foregroundColor: cs.secondary,
+                        ),
+                        onPressed: () async {
+                          final secret = await Navigator.of(context).push<String>(
+                            MaterialPageRoute(
+                                builder: (_) => const QrScannerScreen()),
+                          );
+                          if (secret != null && secret.isNotEmpty) {
+                            _totpSecretCtrl.text = secret;
+                            _updateLiveTotp();
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 10),
                     TextFormField(
                       controller: _totpSecretCtrl,
                       obscureText: _obscureSecret,
