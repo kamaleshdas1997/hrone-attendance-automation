@@ -358,7 +358,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
+        color: cs.surfaceVariant,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(

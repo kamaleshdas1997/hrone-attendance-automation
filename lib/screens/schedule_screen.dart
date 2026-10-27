@@ -111,7 +111,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               elevation: 0,
               color: _enabled
                   ? cs.primaryContainer
-                  : cs.surfaceContainerHighest,
+                  : cs.surfaceVariant,
               child: SwitchListTile(
                 title: Text(
                   _enabled ? 'Automation ON' : 'Automation OFF',
@@ -322,7 +322,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
+        color: cs.surfaceVariant,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(

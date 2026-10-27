@@ -236,7 +236,7 @@ class _StatusScreenState extends State<StatusScreen> {
         gradient: LinearGradient(
           colors: active
               ? [const Color(0xFF1565C0), const Color(0xFF0288D1)]
-              : [cs.surfaceContainerHighest, cs.surfaceContainerHighest],
+              : [cs.surfaceVariant, cs.surfaceVariant],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -347,7 +347,7 @@ class _StatusScreenState extends State<StatusScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
+        color: cs.surfaceVariant,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
