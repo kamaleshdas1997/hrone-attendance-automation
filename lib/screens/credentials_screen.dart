@@ -16,17 +16,13 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
   late TextEditingController _domainCtrl;
   late TextEditingController _userCtrl;
   late TextEditingController _passCtrl;
+  late TextEditingController _mfaCtrl;
 
   bool _obscurePass = true;
   bool _saving = false;
   String? _feedback;
   bool _feedbackSuccess = false;
 
-  // ---------------------------------------------------------------------------
-  // Attempt to derive the HROne domain from a corporate email address.
-  // e.g.  john.doe@acmecorp.com  →  "acmecorp"
-  //        john@subsidiary.acme.co.in  →  "subsidiary"  (first label after @)
-  // Gmail / Yahoo / Outlook etc. return '' so the user fills it manually.
   static const _publicDomains = {
     'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.in', 'yahoo.co.in',
     'hotmail.com', 'outlook.com', 'live.com', 'icloud.com', 'rediffmail.com',
@@ -38,20 +34,14 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     if (at < 0) return '';
     final host = email.substring(at + 1).toLowerCase().trim();
     if (_publicDomains.contains(host)) return '';
-    // First label of the host, e.g. "acmecorp" from "acmecorp.com"
     return host.split('.').first;
   }
 
   @override
   void initState() {
     super.initState();
-    // Pre-fill from saved prefs; if not saved, seed from signed-in user email.
-    const savedEmail = ''; // will be filled from prefs
     final savedDomain = widget.prefs.getString(PrefKeys.domain) ?? '';
     final savedUsername = widget.prefs.getString(PrefKeys.username) ?? '';
-
-    // If nothing saved yet, use the app's known user email (kamaleshd713@gmail.com
-    // is a public domain, so domain stays empty for manual entry).
     const knownEmail = 'kamaleshd713@gmail.com';
     final seedEmail = savedUsername.isNotEmpty ? savedUsername : knownEmail;
     final seedDomain = savedDomain.isNotEmpty
@@ -62,6 +52,8 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     _userCtrl = TextEditingController(text: seedEmail);
     _passCtrl = TextEditingController(
         text: widget.prefs.getString(PrefKeys.password) ?? '');
+    _mfaCtrl = TextEditingController(
+        text: widget.prefs.getString(PrefKeys.mfaCode) ?? '');
   }
 
   @override
@@ -69,38 +61,25 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     _domainCtrl.dispose();
     _userCtrl.dispose();
     _passCtrl.dispose();
+    _mfaCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    setState(() {
-      _saving = true;
-      _feedback = null;
-    });
+    setState(() { _saving = true; _feedback = null; });
 
-    final service = AttendanceService(widget.prefs);
-    await service.saveCredentials(
+    await AttendanceService(widget.prefs).saveCredentials(
       domain: _domainCtrl.text,
       username: _userCtrl.text,
       password: _passCtrl.text,
+      mfaCode: _mfaCtrl.text.trim(),
     );
 
-    // Test login
-    try {
-      // ignore: invalid_use_of_visible_for_testing_member
-      await service.punchIn(); // will attempt token fetch
-      // We just care that no exception is thrown for credential check
-      // Actually let's just verify by trying to get a token
-    } catch (_) {
-      // We catch below
-    }
-
-    // Simple connectivity verify
     setState(() {
       _saving = false;
       _feedbackSuccess = true;
-      _feedback = 'Credentials saved. Tap "Test Connection" to verify login.';
+      _feedback = 'Credentials saved. Tap "Test Connection" to verify.';
     });
   }
 
@@ -112,46 +91,26 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
       _feedbackSuccess = false;
     });
 
-    await AttendanceService(widget.prefs).saveCredentials(
+    final svc = AttendanceService(widget.prefs);
+    await svc.saveCredentials(
       domain: _domainCtrl.text,
       username: _userCtrl.text,
       password: _passCtrl.text,
+      mfaCode: _mfaCtrl.text.trim(),
     );
 
-    // We test login by trying to hit the login endpoint
     try {
-      final svc = AttendanceService(widget.prefs);
-      // Access private method via a punch attempt; if token obtained → success
-      final result = await svc.punchIn();
-      // If we get a network/auth result (even a failed punch due to policy),
-      // but NOT a connection error, credentials are valid.
-      if (result.message.contains('401') ||
-          result.message.contains('Login failed')) {
-        setState(() {
-          _saving = false;
-          _feedbackSuccess = false;
-          _feedback = '❌ Login failed. Check your domain / credentials.';
-        });
-      } else if (result.message.contains('Exception') ||
-          result.message.contains('SocketException') ||
-          result.message.contains('TimeoutException')) {
-        setState(() {
-          _saving = false;
-          _feedbackSuccess = false;
-          _feedback = '❌ Could not reach HROne: ${result.message}';
-        });
-      } else {
-        setState(() {
-          _saving = false;
-          _feedbackSuccess = true;
-          _feedback = '✅ Connected! ${result.success ? 'Punch-In also succeeded.' : 'Login OK (punch skipped — automation will handle timing).'}';
-        });
-      }
+      await svc.testLogin();
+      setState(() {
+        _saving = false;
+        _feedbackSuccess = true;
+        _feedback = '✅ Connected! Credentials are valid.';
+      });
     } catch (e) {
       setState(() {
         _saving = false;
         _feedbackSuccess = false;
-        _feedback = '❌ Error: $e';
+        _feedback = '❌ ${e.toString().replaceFirst('Exception: ', '')}';
       });
     }
   }
@@ -186,7 +145,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        'Enter your HROne login credentials.\nThey are stored locally on your device.',
+                        'Enter your HROne login credentials.\nStored locally on your device only.',
                         style: TextStyle(color: cs.onPrimaryContainer),
                       ),
                     ),
@@ -212,7 +171,6 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                     (v == null || v.trim().isEmpty) ? 'Required' : null,
               ),
               const SizedBox(height: 6),
-              // Helper chip: auto-derive domain from email
               Align(
                 alignment: Alignment.centerLeft,
                 child: ActionChip(
@@ -226,8 +184,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
                           content: Text(
-                              'Could not detect domain — please enter it manually.\n'
-                              '(Public email providers like Gmail are not usable for domain detection.)'),
+                              'Could not detect domain — please enter it manually.'),
                         ),
                       );
                     }
@@ -248,7 +205,6 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                 ),
                 keyboardType: TextInputType.emailAddress,
                 onChanged: (v) {
-                  // Auto-fill domain from corporate email if domain is empty
                   final guessed = _guessDomainFromEmail(v);
                   if (guessed.isNotEmpty && _domainCtrl.text.isEmpty) {
                     setState(() => _domainCtrl.text = guessed);
@@ -278,6 +234,56 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                 ),
                 validator: (v) =>
                     (v == null || v.isEmpty) ? 'Required' : null,
+              ),
+              const SizedBox(height: 20),
+
+              // ── MFA / Authenticator section ──────────────────────────────
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: cs.secondaryContainer.withOpacity(0.4),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: cs.secondary.withOpacity(0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.security, color: cs.secondary, size: 20),
+                        const SizedBox(width: 8),
+                        Text('Authenticator App (MFA)',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelLarge
+                                ?.copyWith(fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'If your HROne account uses Google Authenticator / Authy, '
+                      'enter the current 6-digit code here before tapping Test Connection. '
+                      'The app will use this code for background punches too — '
+                      'update it here if your session token ever expires.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSecondaryContainer),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _mfaCtrl,
+                      keyboardType: TextInputType.number,
+                      maxLength: 8,
+                      decoration: const InputDecoration(
+                        labelText: 'MFA Code (optional)',
+                        hintText: '6-digit code from your authenticator',
+                        prefixIcon: Icon(Icons.pin_outlined),
+                        counterText: '',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 28),
 
@@ -341,7 +347,8 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                 icon: Icons.security_outlined,
                 title: 'Security Note',
                 body:
-                    'Credentials are stored in your device\'s secure local storage (SharedPreferences). They are never sent anywhere except the HROne API.',
+                    'Credentials are stored in your device\'s local storage. '
+                    'They are never sent anywhere except the HROne API.',
               ),
             ],
           ),

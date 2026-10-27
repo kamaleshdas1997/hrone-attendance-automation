@@ -13,6 +13,13 @@ class AttendanceResult {
   const AttendanceResult({required this.success, required this.message});
 }
 
+/// Thrown when the server requires an OTP before issuing a token.
+class OtpRequiredException implements Exception {
+  /// Temporary session identifier returned by the server's first-step response.
+  final String sessionToken;
+  const OtpRequiredException(this.sessionToken);
+}
+
 // ---------------------------------------------------------------------------
 // Pref keys
 // ---------------------------------------------------------------------------
@@ -29,6 +36,7 @@ class PrefKeys {
   static const activeDays = 'active_days'; // comma-separated ints: 1=Mon…7=Sun
   static const randomizeEnabled = 'randomize_enabled';
   static const randomizeMinutes = 'randomize_minutes'; // default 5
+  static const mfaCode = 'hrone_mfa_code'; // TOTP code from authenticator app
   static const lastPunchInTime = 'last_punch_in_time';
   static const lastPunchOutTime = 'last_punch_out_time';
   static const lastPunchInStatus = 'last_punch_in_status';
@@ -56,10 +64,16 @@ class AttendanceService {
     required String domain,
     required String username,
     required String password,
+    String mfaCode = '',
   }) async {
     await _prefs.setString(PrefKeys.domain, domain.trim());
     await _prefs.setString(PrefKeys.username, username.trim());
     await _prefs.setString(PrefKeys.password, password);
+    if (mfaCode.isNotEmpty) {
+      await _prefs.setString(PrefKeys.mfaCode, mfaCode.trim());
+    } else {
+      await _prefs.remove(PrefKeys.mfaCode);
+    }
     await _prefs.remove(PrefKeys.authToken);
   }
 
@@ -87,25 +101,38 @@ class AttendanceService {
 
   // ---- Auth ----------------------------------------------------------------
 
+  /// Returns a bearer token.
+  /// Throws [OtpRequiredException] if the server requires a 2FA OTP first.
+  /// Throws [Exception] on credential failure or network error.
   Future<String> _getToken({bool forceRefresh = false}) async {
     final cached = _prefs.getString(PrefKeys.authToken);
     if (cached != null && cached.isNotEmpty && !forceRefresh) return cached;
 
+    final mfaCode = _prefs.getString(PrefKeys.mfaCode) ?? '';
+
     final uri = Uri.parse('$_baseUrl/api/v1/auth/login');
+    final body = <String, dynamic>{
+      'domain': domain,
+      'username': username,
+      'password': password,
+    };
+    // Include TOTP code if user has saved one (authenticator app flow)
+    if (mfaCode.isNotEmpty) {
+      body['mfaCode'] = mfaCode;
+      body['totpCode'] = mfaCode;
+      body['otp'] = mfaCode;
+    }
+
     final resp = await http
         .post(
           uri,
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'domain': domain,
-            'username': username,
-            'password': password,
-          }),
+          body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 15));
 
     if (resp.statusCode == 200) {
-      final json = jsonDecode(resp.body);
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
       final token = json['data']?['token'] ??
           json['data']?['accessToken'] ??
           json['token'] ??
@@ -121,6 +148,14 @@ class AttendanceService {
   }
 
   // ---- Attendance API ------------------------------------------------------
+
+  /// Attempts login only (no punch). Used by credentials screen to verify.
+  /// Throws [OtpRequiredException] if 2FA is needed.
+  /// Throws [Exception] on bad credentials or network failure.
+  Future<void> testLogin() async {
+    await _prefs.remove(PrefKeys.authToken); // force fresh login
+    await _getToken();
+  }
 
   Future<AttendanceResult> punchIn() => _punch('IN');
   Future<AttendanceResult> punchOut() => _punch('OUT');
