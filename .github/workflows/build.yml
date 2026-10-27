@@ -37,11 +37,39 @@ jobs:
           echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
           echo "sdk.dir=$ANDROID_HOME" >> android/local.properties
 
+      - name: Create Android debug keystore
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair \
+            -alias androiddebugkey \
+            -keypass android \
+            -keystore ~/.android/debug.keystore \
+            -storepass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storetype JKS
+
       - name: Analyze code
         run: flutter analyze --no-fatal-infos || true
 
       - name: Build release APK
         run: flutter build apk --release
+
+      - name: Locate and copy APK
+        run: |
+          # Flutter 3.24 with AGP 8 may write to different paths; find it and copy to standard location
+          APK=$(find build -name "app-release.apk" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No app-release.apk found anywhere in build/"
+            find build -name "*.apk" 2>/dev/null || echo "No APKs at all"
+            exit 1
+          fi
+          echo "Found APK at: $APK"
+          mkdir -p build/app/outputs/flutter-apk/
+          cp "$APK" build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -49,6 +77,14 @@ jobs:
           name: hrone-attendance-${{ github.sha }}
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
+
+      - name: Delete existing latest release
+        if: github.event_name != 'pull_request'
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          git push --delete origin latest 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         if: github.event_name != 'pull_request'
