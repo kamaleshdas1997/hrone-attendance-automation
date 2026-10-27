@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'credentials_screen.dart';
 import 'schedule_screen.dart';
 import 'status_screen.dart';
+import '../services/notification_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,6 +21,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _prefsFuture = SharedPreferences.getInstance();
+
+    // Request notification permission after first frame — avoids crash on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await NotificationService().init();
+      await NotificationService().requestPermission();
+    });
   }
 
   @override

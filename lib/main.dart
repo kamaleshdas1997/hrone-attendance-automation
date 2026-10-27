@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:workmanager/workmanager.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/home_screen.dart';
@@ -52,11 +51,14 @@ void callbackDispatcher() {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Init notifications
-  await NotificationService().init();
-
-  // Init Workmanager
-  await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
+  // Initialize Workmanager for background tasks.
+  // Must complete before runApp so the callback dispatcher is registered.
+  try {
+    await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
+  } catch (_) {
+    // Workmanager init failure is non-fatal — app still opens, background
+    // tasks won't fire until the user saves the schedule again.
+  }
 
   runApp(const HROneApp());
 }
