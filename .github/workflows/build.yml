@@ -57,19 +57,15 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release
 
-      - name: Locate and copy APK
+      - name: Verify APK exists
         run: |
-          # Flutter 3.24 with AGP 8 may write to different paths; find it and copy to standard location
-          APK=$(find build -name "app-release.apk" 2>/dev/null | head -1)
-          if [ -z "$APK" ]; then
-            echo "ERROR: No app-release.apk found anywhere in build/"
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found at expected path"
             find build -name "*.apk" 2>/dev/null || echo "No APKs at all"
             exit 1
           fi
-          echo "Found APK at: $APK"
-          mkdir -p build/app/outputs/flutter-apk/
-          cp "$APK" build/app/outputs/flutter-apk/app-release.apk
-          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          echo "APK ready: $(ls -lh $APK)"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
