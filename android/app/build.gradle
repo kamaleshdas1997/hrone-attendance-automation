@@ -1,20 +1,8 @@
-def localProperties = new Properties()
-def localPropertiesFile = rootProject.file('local.properties')
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.withReader('UTF-8') { reader ->
-        localProperties.load(reader)
-    }
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
 }
-
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    flutterRoot = System.getenv('FLUTTER_ROOT')
-}
-assert flutterRoot != null, "flutter.sdk not set in local.properties and FLUTTER_ROOT not set"
-
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
     namespace "com.example.hrone_attendance"
@@ -56,7 +44,6 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            // Use debug signing for CI/sideload builds (no Play Store upload needed)
             signingConfig signingConfigs.debug
             minifyEnabled false
             shrinkResources false
@@ -69,6 +56,5 @@ flutter {
 }
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     implementation "androidx.work:work-runtime-ktx:2.9.0"
 }
