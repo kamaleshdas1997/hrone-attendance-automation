@@ -41,9 +41,9 @@
             android:foregroundServiceType="shortService"
             android:exported="false"/>
 
-        <!-- Relaunch tasks after device reboot -->
+        <!-- Relaunch tasks after device reboot (workmanager 0.5.x package) -->
         <receiver
-            android:name="be.tramckrijte.workmanager.RescheduledWorker"
+            android:name="dev.fluttercommunity.plus.workmanager.RescheduledWorker"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
