@@ -236,7 +236,7 @@ class _StatusScreenState extends State<StatusScreen> {
         gradient: LinearGradient(
           colors: active
               ? [const Color(0xFF1565C0), const Color(0xFF0288D1)]
-              : [cs.surfaceVariant, cs.surfaceVariant],
+              : [cs.surfaceContainerHighest, cs.surfaceContainerHighest],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -249,7 +249,7 @@ class _StatusScreenState extends State<StatusScreen> {
             children: [
               Icon(
                 active ? Icons.check_circle : Icons.info_outline,
-                color: active ? Colors.white : cs.onSurfaceVariant,
+                color: active ? Colors.white : cs.onSurface.withOpacity(0.7),
                 size: 20,
               ),
               const SizedBox(width: 8),
@@ -257,7 +257,7 @@ class _StatusScreenState extends State<StatusScreen> {
                 active ? 'Automation Active' : 'Automation Inactive',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
-                  color: active ? Colors.white : cs.onSurfaceVariant,
+                  color: active ? Colors.white : cs.onSurface.withOpacity(0.7),
                 ),
               ),
             ],
@@ -347,7 +347,7 @@ class _StatusScreenState extends State<StatusScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cs.surfaceVariant,
+        color: cs.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
@@ -371,7 +371,7 @@ class _StatusScreenState extends State<StatusScreen> {
                     style: Theme.of(context)
                         .textTheme
                         .bodySmall
-                        ?.copyWith(color: cs.onSurfaceVariant)),
+                        ?.copyWith(color: cs.onSurface.withOpacity(0.7))),
               )),
         ],
       ),

@@ -120,7 +120,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             // ── Enable toggle ──────────────────────────────────────────────
             Card(
               elevation: 0,
-              color: _enabled ? cs.primaryContainer : cs.surfaceVariant,
+              color: _enabled ? cs.primaryContainer : cs.surfaceContainerHighest,
               child: SwitchListTile(
                 title: Text(
                   _enabled ? 'Automation ON' : 'Automation OFF',
@@ -270,7 +270,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             decoration: BoxDecoration(
               color: selected
                   ? (isWeekend ? Colors.orange : cs.primary)
-                  : cs.surfaceVariant,
+                  : cs.surfaceContainerHighest,
               shape: BoxShape.circle,
               border: Border.all(
                 color: selected
@@ -303,7 +303,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   Widget _randomnessCard(ColorScheme cs) {
     return Card(
       elevation: 0,
-      color: _randomize ? cs.secondaryContainer.withOpacity(0.6) : cs.surfaceVariant,
+      color: _randomize ? cs.secondaryContainer.withOpacity(0.6) : cs.surfaceContainerHighest,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         child: Row(
@@ -322,7 +322,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                         ? 'Each punch fires within ±5 min of set time — looks natural'
                         : 'Punches fire at exact scheduled times',
                     style: TextStyle(
-                        fontSize: 12, color: cs.onSurfaceVariant),
+                        fontSize: 12, color: cs.onSurface.withOpacity(0.7)),
                   ),
                 ],
               ),
@@ -444,7 +444,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-          color: cs.surfaceVariant,
+          color: cs.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(10)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -468,7 +468,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     style: Theme.of(context)
                         .textTheme
                         .bodySmall
-                        ?.copyWith(color: cs.onSurfaceVariant)),
+                        ?.copyWith(color: cs.onSurface.withOpacity(0.7))),
               )),
         ],
       ),

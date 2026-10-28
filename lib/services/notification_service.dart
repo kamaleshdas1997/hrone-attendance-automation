@@ -46,20 +46,40 @@ class NotificationService {
     required int id,
     required String title,
     required String body,
+    bool isLoginExpired = false,
   }) async {
     if (!_initialized) await init();
     try {
-      const androidDetails = AndroidNotificationDetails(
-        'hrone_attendance_channel',
-        'Attendance Automation',
-        channelDescription: 'Notifications for automated attendance punches',
-        importance: Importance.high,
-        priority: Priority.high,
+      final androidDetails = AndroidNotificationDetails(
+        isLoginExpired
+            ? 'hrone_login_expired'
+            : 'hrone_attendance_channel',
+        isLoginExpired ? 'Login Alerts' : 'Attendance Automation',
+        channelDescription: isLoginExpired
+            ? 'Alerts when your HROne login session expires'
+            : 'Notifications for automated attendance punches',
+        importance: isLoginExpired ? Importance.max : Importance.high,
+        priority: isLoginExpired ? Priority.max : Priority.high,
         icon: '@mipmap/ic_launcher',
+        autoCancel: true,
+        // Expand full help text for login-expired notifications
+        styleInformation: isLoginExpired
+            ? const BigTextStyleInformation(
+                'Your HROne login session has expired and attendance was NOT marked.\n\n'
+                'Open the app → Account tab → tap "Sign in with Microsoft" to renew your session. '
+                'Scheduled punches will resume automatically.',
+                htmlFormatBigText: false,
+                contentTitle: '🔑 Action required',
+                summaryText: 'Tap to open the app',
+              )
+            : null,
       );
-      const iosDetails = DarwinNotificationDetails();
-      const details =
-          NotificationDetails(android: androidDetails, iOS: iosDetails);
+      const iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      final details = NotificationDetails(android: androidDetails, iOS: iosDetails);
       await _plugin.show(id, title, body, details);
     } catch (_) {
       // Silent fail — punch already happened, notification is non-critical

@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/attendance_service.dart';
 import 'qr_scanner_screen.dart';
+import 'sso_login_screen.dart';
 
 class CredentialsScreen extends StatefulWidget {
   final SharedPreferences prefs;
@@ -420,6 +421,104 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                   ],
                 ),
               ),
+              const SizedBox(height: 24),
+
+              // ── Microsoft SSO login ───────────────────────────────────────
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0078D4).withOpacity(0.07),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: const Color(0xFF0078D4).withOpacity(0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.login,
+                            color: Color(0xFF0078D4), size: 20),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Microsoft SSO (Recommended)',
+                          style: Theme.of(context)
+                              .textTheme
+                              .labelLarge
+                              ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  color: const Color(0xFF0078D4)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'If your company uses Microsoft login for HROne, '
+                      'sign in here once. The app will automatically renew '
+                      'the session — you only need to sign in again when '
+                      'the refresh token expires (~90 days).',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF0078D4),
+                          foregroundColor: Colors.white,
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                        ),
+                        icon: const Icon(Icons.open_in_browser, size: 20),
+                        label: const Text(
+                          'Sign in with Microsoft',
+                          style: TextStyle(fontSize: 15),
+                        ),
+                        onPressed: _saving
+                            ? null
+                            : () async {
+                                // Save domain/username first so SSO screen
+                                // knows which tenant URL to open
+                                if (_domainCtrl.text.trim().isEmpty) {
+                                  ScaffoldMessenger.of(context)
+                                      .showSnackBar(const SnackBar(
+                                    content: Text(
+                                        'Enter your Company Domain first.'),
+                                  ));
+                                  return;
+                                }
+                                await AttendanceService(widget.prefs)
+                                    .saveCredentials(
+                                  domain: _domainCtrl.text,
+                                  username: _userCtrl.text,
+                                  password: _passCtrl.text,
+                                  totpSecret: _totpSecretCtrl.text,
+                                );
+                                if (!context.mounted) return;
+                                final ok =
+                                    await Navigator.of(context).push<bool>(
+                                  MaterialPageRoute(
+                                    builder: (_) => SsoLoginScreen(
+                                        prefs: widget.prefs),
+                                  ),
+                                );
+                                if (ok == true && context.mounted) {
+                                  setState(() {
+                                    _feedbackSuccess = true;
+                                    _feedback =
+                                        '✅ Microsoft login successful! '
+                                        'Session saved — punches will use '
+                                        'this session automatically.';
+                                  });
+                                }
+                              },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 28),
 
               // Buttons
@@ -500,13 +599,13 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: cs.surfaceVariant,
+        color: cs.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 20, color: cs.onSurfaceVariant),
+          Icon(icon, size: 20, color: cs.onSurface),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -520,7 +619,7 @@ class _CredentialsScreenState extends State<CredentialsScreen> {
                 const SizedBox(height: 4),
                 Text(body,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: cs.onSurfaceVariant)),
+                        color: cs.onSurface.withOpacity(0.7))),
               ],
             ),
           ),
