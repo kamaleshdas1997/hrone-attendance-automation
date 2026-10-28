@@ -50,6 +50,12 @@ class PrefKeys {
   static const lastPunchOutTime = 'last_punch_out_time';
   static const lastPunchInStatus = 'last_punch_in_status';
   static const lastPunchOutStatus = 'last_punch_out_status';
+
+  // Auto-discovered from WebView network interceptor
+  static const discoveredApiBase = 'discovered_api_base';
+  static const discoveredPunchUrl = 'discovered_punch_url';
+  static const discoveredPunchHeaders = 'discovered_punch_headers';
+  static const discoveredPunchBody = 'discovered_punch_body';
 }
 
 // ---------------------------------------------------------------------------
@@ -307,16 +313,125 @@ class AttendanceService {
       }
       final iso = now.toIso8601String().substring(0, 19);
 
-      // Try multiple known HROne attendance endpoint patterns
+      // ── Strategy 1: Use auto-discovered endpoint from WebView interceptor ──
+      // When the user logs in via SSO WebView, we capture the real punch URL.
+      // Use it first — it's the only one guaranteed to work.
+      final discoveredUrl = _prefs.getString(PrefKeys.discoveredPunchUrl);
+      final discoveredHeadersJson = _prefs.getString(PrefKeys.discoveredPunchHeaders);
+      final discoveredBase = _prefs.getString(PrefKeys.discoveredApiBase) ?? _baseUrl;
+
+      if (discoveredUrl != null && discoveredUrl.isNotEmpty) {
+        try {
+          // Rebuild headers: use discovered headers + override Authorization with fresh token
+          final Map<String, String> headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': 'Bearer $token',
+            'Origin': discoveredBase,
+            'Referer': '$discoveredBase/',
+          };
+
+          if (discoveredHeadersJson != null) {
+            try {
+              final discovered = jsonDecode(discoveredHeadersJson) as Map<String, dynamic>;
+              for (final entry in discovered.entries) {
+                final k = entry.key as String;
+                final v = entry.value as String? ?? '';
+                // Keep all discovered headers EXCEPT Authorization (we use fresh token)
+                if (k.toLowerCase() != 'authorization') {
+                  headers[k] = v;
+                }
+              }
+            } catch (_) {}
+          }
+
+          // Build body — replace punchType value with current type
+          Map<String, dynamic> body;
+          final discoveredBody = _prefs.getString(PrefKeys.discoveredPunchBody);
+          if (discoveredBody != null && discoveredBody.isNotEmpty) {
+            try {
+              final template = jsonDecode(discoveredBody) as Map<String, dynamic>;
+              body = Map<String, dynamic>.from(template);
+              // Replace punch type values
+              for (final k in body.keys.toList()) {
+                final v = body[k]?.toString() ?? '';
+                if (v == 'IN' || v == 'OUT' || v == 'PUNCH_IN' || v == 'PUNCH_OUT' ||
+                    v == 'in' || v == 'out' || v == 'punch_in' || v == 'punch_out') {
+                  if (type == 'IN') {
+                    if (v.contains('_')) {
+                      body[k] = 'PUNCH_IN';
+                    } else {
+                      body[k] = v == v.toUpperCase() ? 'IN' : 'in';
+                    }
+                  } else {
+                    if (v.contains('_')) {
+                      body[k] = 'PUNCH_OUT';
+                    } else {
+                      body[k] = v == v.toUpperCase() ? 'OUT' : 'out';
+                    }
+                  }
+                }
+                // Update time fields
+                if (k.toLowerCase().contains('time') || k.toLowerCase().contains('date')) {
+                  body[k] = k.toLowerCase().contains('date') ? iso.substring(0, 10) : iso;
+                }
+              }
+            } catch (_) {
+              body = {'punchType': type, 'punchTime': iso};
+            }
+          } else {
+            body = {'punchType': type, 'punchTime': iso};
+          }
+
+          var resp = await http.post(
+            Uri.parse(discoveredUrl),
+            headers: headers,
+            body: jsonEncode(body),
+          ).timeout(const Duration(seconds: 15));
+
+          if (resp.statusCode == 401) {
+            final fresh = await _getToken(forceRefresh: true);
+            headers['Authorization'] = 'Bearer $fresh';
+            resp = await http.post(
+              Uri.parse(discoveredUrl),
+              headers: headers,
+              body: jsonEncode(body),
+            ).timeout(const Duration(seconds: 15));
+          }
+
+          if (resp.statusCode >= 200 && resp.statusCode < 300) {
+            final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
+            await _saveStatus(type, true, msg);
+            return AttendanceResult(success: true, message: msg);
+          }
+          // Non-2xx but not 404 → real error, don't probe further
+          if (resp.statusCode != 404) {
+            final errMsg = 'Punch failed (${resp.statusCode}). '
+                'Open app and punch manually once to re-capture the API endpoint.';
+            await _saveStatus(type, false, errMsg);
+            return AttendanceResult(success: false, message: errMsg);
+          }
+          // 404 on discovered URL → URL stale, clear it and fall through to probing
+          await _prefs.remove(PrefKeys.discoveredPunchUrl);
+        } catch (_) {
+          // Network error → fall through to probing
+        }
+      }
+
+      // ── Strategy 2: Probe known endpoint patterns ─────────────────────────
+      // Used as fallback when no discovered URL exists yet.
+      // Tell user to punch manually once to discover the real endpoint.
       final punchEndpoints = [
+        '$discoveredBase/api/attendance/punch',
+        '$discoveredBase/api/v1/attendance/punch',
+        '$discoveredBase/api/attendance/mark-attendance',
+        '$discoveredBase/api/v1/attendance/mark-attendance',
         '$_baseUrl/api/attendance/punch',
         '$_baseUrl/api/v1/attendance/punch',
         '$_baseUrl/api/attendance/mark-attendance',
         '$_baseUrl/api/v1/attendance/mark-attendance',
-        '$_baseUrl/api/v2/attendance/punch',
       ];
 
-      // Multiple body shapes HROne might expect
       final bodies = [
         {'punchType': type, 'punchTime': iso, 'punchDate': iso.substring(0, 10)},
         {'type': type, 'time': iso, 'date': iso.substring(0, 10)},
@@ -332,8 +447,8 @@ class AttendanceService {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
               'Authorization': 'Bearer $tkn',
-              'Origin': _baseUrl,
-              'Referer': '$_baseUrl/',
+              'Origin': discoveredBase,
+              'Referer': '$discoveredBase/',
             },
             body: jsonEncode(body),
           ).timeout(const Duration(seconds: 15));
@@ -344,38 +459,36 @@ class AttendanceService {
         for (final body in bodies) {
           try {
             var resp = await doPost(endpoint, body, token);
-
-            // 401 → refresh and retry once
             if (resp.statusCode == 401) {
               final fresh = await _getToken(forceRefresh: true);
               resp = await doPost(endpoint, body, fresh);
             }
-
-            // 404 = wrong endpoint, try next combination
             if (resp.statusCode == 404) continue;
-
             final ok = resp.statusCode >= 200 && resp.statusCode < 300;
             if (ok) {
-              final msg =
-                  'Punch $type at $iso${randomize ? ' (±${maxJitter}m jitter)' : ''}';
+              // Save this working endpoint for next time
+              await _prefs.setString(PrefKeys.discoveredPunchUrl, endpoint);
+              await _prefs.setString(PrefKeys.discoveredPunchBody, jsonEncode(body));
+              final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
               await _saveStatus(type, true, msg);
               return AttendanceResult(success: true, message: msg);
             } else {
               lastError = 'Error ${resp.statusCode}: ${resp.body}';
-              // Non-404 error on this endpoint — don't try other bodies
               break;
             }
-          } catch (_) {
-            // Network/timeout on this endpoint — try next
-          }
+          } catch (_) {}
         }
         if (lastError != null && !lastError.startsWith('Error 404')) break;
       }
 
-      final errMsg = lastError ??
-          'Could not reach HROne attendance API. Try manual punch from the app.';
-      await _saveStatus(type, false, errMsg);
-      return AttendanceResult(success: false, message: errMsg);
+      // All probes failed — tell user to punch from the web app once so
+      // the WebView interceptor can capture the real endpoint.
+      const guidance = 'Endpoint not yet discovered.\n\n'
+          '👉 Open the app → Account → "Sign in with Microsoft"\n'
+          '→ log in → go to HROne Attendance page → tap Punch In/Out once.\n'
+          'The app will auto-capture the real API endpoint for future background punches.';
+      await _saveStatus(type, false, guidance);
+      return AttendanceResult(success: false, message: guidance);
     } on LoginExpiredException {
       const msg = 'Login expired — open the app to sign in again.';
       await _saveStatus(type, false, msg);

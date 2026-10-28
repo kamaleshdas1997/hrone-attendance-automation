@@ -7,16 +7,11 @@ import '../services/attendance_service.dart';
 
 /// Opens a WebView that loads the HROne Microsoft login page.
 ///
-/// Flow:
-///   1. User taps "Sign in with Microsoft"
-///   2. WebView loads `https://<domain>.hrone.cloud`
-///   3. HROne redirects to Microsoft login — user signs in with MFA in the WebView
-///   4. After successful auth, HROne redirects back to its own URL
-///   5. We intercept the redirect, extract the Bearer token from:
-///      - URL query params (token= / access_token= / jwt=)
-///      - Or from the page's localStorage via JavaScript injection
-///      - Or from the navigation request headers (Authorization)
-///   6. Call [AttendanceService.saveSsoTokens()] and pop with success=true
+/// Extended behaviour (v2):
+///   • Intercepts every XHR / fetch the page makes via JS monkey-patching
+///   • Captures the real punch endpoint URL + auth headers automatically
+///   • Saves captured endpoint + token to SharedPreferences so the background
+///     worker can call the exact same URL with the exact same headers
 class SsoLoginScreen extends StatefulWidget {
   final SharedPreferences prefs;
   const SsoLoginScreen({super.key, required this.prefs});
@@ -30,6 +25,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   bool _loading = true;
   String? _error;
   bool _tokenCaptured = false;
+  String _statusMsg = '';
 
   @override
   void initState() {
@@ -40,36 +36,12 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   String get _domain =>
       widget.prefs.getString(PrefKeys.domain)?.trim() ?? '';
 
-  /// The HROne tenant login URL.
-  ///
-  /// HROne uses a single app at app.hrone.cloud — the "domain" the user enters
-  /// is just their company slug used for the login form, NOT a subdomain.
-  /// The correct login URL is always: https://app.hrone.cloud/login
-  /// (or https://app.hrone.cloud — it redirects to /login automatically).
-  ///
-  /// If the user entered a full URL or subdomain (e.g. "mycompany.hrone.cloud"
-  /// or "https://app.hrone.cloud"), we normalise it.
   String get _startUrl {
     final d = _domain;
-
-    // If empty, go to the main login page
     if (d.isEmpty) return 'https://app.hrone.cloud/login';
-
-    // If user pasted a full URL
-    if (d.startsWith('http://') || d.startsWith('https://')) {
-      return d;
-    }
-
-    // If user entered a full hostname that already contains hrone.cloud
-    // (e.g. "mycompany.hrone.cloud" or "app.hrone.cloud")
+    if (d.startsWith('http://') || d.startsWith('https://')) return d;
     if (d.contains('hrone.cloud')) return 'https://$d/login';
-
-    // If user entered a hostname with dots but no hrone.cloud
-    // (unlikely, but treat as full custom domain)
     if (d.contains('.')) return 'https://$d';
-
-    // Default: short company slug → use main app login page
-    // Pass domain as query param so HROne can pre-fill the company field
     return 'https://app.hrone.cloud/login?domain=$d&company=$d';
   }
 
@@ -82,6 +54,8 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           onPageStarted: (_) => setState(() => _loading = true),
           onPageFinished: (url) async {
             setState(() => _loading = false);
+            // Inject network interceptor on every page load
+            await _injectNetworkInterceptor();
             if (!_tokenCaptured) {
               await _tryExtractTokenFromPage(url);
             }
@@ -91,21 +65,16 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
             return NavigationDecision.navigate;
           },
           onWebResourceError: (err) {
-            // Ignore subresource errors; only flag main-frame failures
-            // Also ignore 404s on redirect pages — the page itself may still work
-            if (err.isForMainFrame == true && err.errorCode != -2) {
-              // -2 is ERR_FAILED which fires on redirects; ignore it
-              // Only show error for hard failures (no network, SSL, etc.)
+            if (err.isForMainFrame == true) {
               final code = err.errorCode;
-              final isHardFail = code == -6 ||   // ERR_FILE_NOT_FOUND (true 404)
-                  code == -7 ||   // ERR_TIMED_OUT
-                  code == -105 || // ERR_NAME_NOT_RESOLVED
-                  code == -106;   // ERR_INTERNET_DISCONNECTED
+              final isHardFail = code == -6 || code == -7 ||
+                  code == -105 || code == -106;
               if (isHardFail) {
                 setState(() {
                   _loading = false;
-                  _error = 'Cannot reach HROne login page (${err.description}).\n\n'
-                      'Check your internet connection or verify the domain in Account settings.';
+                  _error =
+                      'Cannot reach HROne login page (${err.description}).\n\n'
+                      'Check your internet connection or verify your domain in Account settings.';
                 });
               }
             }
@@ -119,109 +88,217 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       ..loadRequest(Uri.parse(_startUrl));
   }
 
-  // ── Token extraction ───────────────────────────────────────────────────────
+  // ── Network interceptor ────────────────────────────────────────────────────
+  // Monkey-patches XMLHttpRequest and fetch so we can see every API call the
+  // HROne web app makes. We look for attendance/punch calls and capture the
+  // URL + Authorization header automatically.
 
-  /// Checks URL query parameters for a token.
-  void _tryExtractTokenFromUrl(String url) {
-    if (_tokenCaptured) return;
-    try {
-      final uri = Uri.parse(url);
-      final params = uri.queryParameters;
-      final token = params['token'] ??
-          params['access_token'] ??
-          params['accessToken'] ??
-          params['jwt'] ??
-          params['id_token'];
-      final refreshToken = params['refresh_token'] ?? params['refreshToken'];
-      final expiresIn = int.tryParse(params['expires_in'] ?? params['expiresIn'] ?? '');
-
-      if (token != null && token.isNotEmpty) {
-        _captureToken(token, refreshToken: refreshToken, expiresIn: expiresIn);
-      }
-    } catch (_) {}
-  }
-
-  /// Injects JS to read localStorage / sessionStorage / cookies for the token.
-  Future<void> _tryExtractTokenFromPage(String url) async {
-    if (_tokenCaptured) return;
-    // Only inject on HROne pages, not Microsoft login pages
-    if (!url.contains('hrone.cloud')) return;
-
+  Future<void> _injectNetworkInterceptor() async {
     const js = r'''
 (function() {
-  // Common key names used by HROne / MSAL
-  const keys = [
-    'token', 'access_token', 'accessToken', 'authToken', 'jwt',
-    'hrone_token', 'hrone_access_token', 'Bearer',
-    'msal.idtoken', 'msal.access.token.keys'
-  ];
+  if (window.__flutterInterceptorInstalled) return;
+  window.__flutterInterceptorInstalled = true;
 
-  // Search localStorage
-  for (const k of keys) {
-    const v = localStorage.getItem(k);
-    if (v && v.length > 20) {
-      FlutterBridge.postMessage(JSON.stringify({source:'localStorage', key:k, value:v}));
-      return;
-    }
-  }
+  // ── XHR interceptor ──────────────────────────────────────────────────────
+  const OrigXHR = window.XMLHttpRequest;
+  function PatchedXHR() {
+    const xhr = new OrigXHR();
+    const capturedHeaders = {};
+    let capturedMethod = '';
+    let capturedUrl = '';
 
-  // Search sessionStorage
-  for (const k of keys) {
-    const v = sessionStorage.getItem(k);
-    if (v && v.length > 20) {
-      FlutterBridge.postMessage(JSON.stringify({source:'sessionStorage', key:k, value:v}));
-      return;
-    }
-  }
+    const origOpen = xhr.open.bind(xhr);
+    xhr.open = function(method, url) {
+      capturedMethod = method;
+      capturedUrl = url;
+      return origOpen(method, url);
+    };
 
-  // Scan ALL localStorage keys for JWT-shaped values (three base64 parts)
-  const jwtRegex = /^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/;
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    const v = localStorage.getItem(k);
-    if (v && jwtRegex.test(v)) {
-      FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan', key:k, value:v}));
-      return;
-    }
-  }
+    const origSetHeader = xhr.setRequestHeader.bind(xhr);
+    xhr.setRequestHeader = function(name, value) {
+      capturedHeaders[name] = value;
+      return origSetHeader(name, value);
+    };
 
-  // MSAL stores access token inside a JSON blob keyed by account
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.includes('accesstoken')) {
-      const v = localStorage.getItem(k);
+    const origSend = xhr.send.bind(xhr);
+    xhr.send = function(body) {
+      // Report ALL API calls so Flutter can see them
       try {
-        const obj = JSON.parse(v);
-        const secret = obj.secret || obj.access_token || obj.token;
-        if (secret && secret.length > 20) {
-          FlutterBridge.postMessage(JSON.stringify({source:'msal', key:k, value:secret}));
-          return;
-        }
+        FlutterBridge.postMessage(JSON.stringify({
+          type: 'xhr',
+          method: capturedMethod,
+          url: capturedUrl,
+          headers: capturedHeaders,
+          body: (typeof body === 'string') ? body : '',
+          status: 0
+        }));
       } catch(_) {}
-    }
-  }
 
-  // Also check window.__HRONE_TOKEN__ or similar globals
-  const globalToken = window.__HRONE_TOKEN__ || window.hroneToken || window.authToken;
-  if (globalToken) {
-    FlutterBridge.postMessage(JSON.stringify({source:'global', key:'window', value: String(globalToken)}));
+      // Hook into load to capture response status
+      xhr.addEventListener('load', function() {
+        try {
+          if (capturedUrl && (
+            capturedUrl.includes('attend') ||
+            capturedUrl.includes('punch') ||
+            capturedUrl.includes('mark')
+          )) {
+            FlutterBridge.postMessage(JSON.stringify({
+              type: 'xhr_response',
+              method: capturedMethod,
+              url: capturedUrl,
+              headers: capturedHeaders,
+              body: (typeof body === 'string') ? body : '',
+              status: xhr.status,
+              responseText: xhr.responseText ? xhr.responseText.substring(0, 500) : ''
+            }));
+          }
+        } catch(_) {}
+      });
+
+      return origSend(body);
+    };
+
+    return xhr;
   }
+  PatchedXHR.prototype = OrigXHR.prototype;
+  window.XMLHttpRequest = PatchedXHR;
+
+  // ── Fetch interceptor ─────────────────────────────────────────────────────
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async function(input, init) {
+    const url = (typeof input === 'string') ? input : (input && input.url) || '';
+    const method = (init && init.method) || 'GET';
+    const headers = (init && init.headers) || {};
+
+    // Report ALL fetch calls
+    try {
+      FlutterBridge.postMessage(JSON.stringify({
+        type: 'fetch',
+        method: method,
+        url: url,
+        headers: headers,
+        body: (init && typeof init.body === 'string') ? init.body : ''
+      }));
+    } catch(_) {}
+
+    const response = await origFetch(input, init);
+
+    // Clone and report attendance-related responses
+    try {
+      if (url && (url.includes('attend') || url.includes('punch') || url.includes('mark'))) {
+        const clone = response.clone();
+        clone.text().then(text => {
+          try {
+            FlutterBridge.postMessage(JSON.stringify({
+              type: 'fetch_response',
+              method: method,
+              url: url,
+              headers: headers,
+              body: (init && typeof init.body === 'string') ? init.body : '',
+              status: response.status,
+              responseText: text.substring(0, 500)
+            }));
+          } catch(_) {}
+        });
+      }
+    } catch(_) {}
+
+    return response;
+  };
 })();
 ''';
-
     try {
       await _controller.runJavaScript(js);
     } catch (_) {}
   }
 
+  // ── Bridge message handler ─────────────────────────────────────────────────
+
   void _handleBridgeMessage(String message) {
-    if (_tokenCaptured) return;
     try {
       final map = jsonDecode(message) as Map<String, dynamic>;
+      final type = map['type'] as String? ?? '';
+
+      // ── Handle all API call captures ─────────────────────────────────────
+      if (type == 'xhr' || type == 'fetch') {
+        final url = map['url'] as String? ?? '';
+        final headers = map['headers'];
+        final method = (map['method'] as String? ?? '').toUpperCase();
+
+        // Save API base URL (first non-microsoft, non-login API call)
+        if (url.isNotEmpty &&
+            url.startsWith('https://') &&
+            !url.contains('microsoft') &&
+            !url.contains('microsoftonline') &&
+            !url.contains('login.') &&
+            url.contains('/api/')) {
+          // Extract base URL (scheme + host)
+          final uri = Uri.tryParse(url);
+          if (uri != null) {
+            final base = '${uri.scheme}://${uri.host}';
+            widget.prefs.setString(PrefKeys.discoveredApiBase, base);
+            setState(() => _statusMsg = 'API discovered: ${uri.host}');
+          }
+        }
+
+        // Extract auth token from headers
+        if (!_tokenCaptured && headers is Map) {
+          final auth = headers['Authorization'] as String? ??
+              headers['authorization'] as String? ??
+              headers['x-auth-token'] as String? ??
+              headers['X-Auth-Token'] as String?;
+
+          if (auth != null && auth.isNotEmpty) {
+            final token = auth.startsWith('Bearer ')
+                ? auth.substring(7)
+                : auth;
+            if (token.length > 20) {
+              _captureToken(token);
+            }
+          }
+        }
+
+        // Save attendance endpoint when we see one
+        if (method == 'POST' &&
+            (url.contains('attend') ||
+                url.contains('punch') ||
+                url.contains('mark-attendance'))) {
+          widget.prefs.setString(PrefKeys.discoveredPunchUrl, url);
+
+          // Save headers map as JSON for the background worker to reuse
+          if (headers is Map) {
+            final headersJson = jsonEncode(headers);
+            widget.prefs.setString(PrefKeys.discoveredPunchHeaders, headersJson);
+          }
+
+          // Save request body template
+          final body = map['body'] as String? ?? '';
+          if (body.isNotEmpty) {
+            widget.prefs.setString(PrefKeys.discoveredPunchBody, body);
+          }
+
+          setState(() => _statusMsg = '✅ Punch endpoint captured!');
+        }
+        return;
+      }
+
+      // ── Handle xhr_response / fetch_response (attendance calls) ──────────
+      if (type == 'xhr_response' || type == 'fetch_response') {
+        final url = map['url'] as String? ?? '';
+        final status = map['status'] as int? ?? 0;
+        if (url.isNotEmpty) {
+          widget.prefs.setString(PrefKeys.discoveredPunchUrl, url);
+          setState(() =>
+              _statusMsg = '📡 Punch API: ${Uri.parse(url).path} ($status)');
+        }
+        return;
+      }
+
+      // ── Handle token value messages ───────────────────────────────────────
+      if (_tokenCaptured) return;
       final value = map['value'] as String? ?? '';
       if (value.isEmpty) return;
 
-      // If the value itself is a JSON string (MSAL pattern), parse it
       String token = value;
       try {
         final inner = jsonDecode(value) as Map<String, dynamic>;
@@ -234,6 +311,77 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       _captureToken(token);
     } catch (_) {}
   }
+
+  // ── Token extraction from URL ──────────────────────────────────────────────
+
+  void _tryExtractTokenFromUrl(String url) {
+    if (_tokenCaptured) return;
+    try {
+      final uri = Uri.parse(url);
+      final p = uri.queryParameters;
+      final token = p['token'] ?? p['access_token'] ?? p['accessToken'] ??
+          p['jwt'] ?? p['id_token'];
+      final refreshToken = p['refresh_token'] ?? p['refreshToken'];
+      final expiresIn =
+          int.tryParse(p['expires_in'] ?? p['expiresIn'] ?? '');
+      if (token != null && token.isNotEmpty) {
+        _captureToken(token, refreshToken: refreshToken, expiresIn: expiresIn);
+      }
+    } catch (_) {}
+  }
+
+  // ── Token extraction from localStorage ────────────────────────────────────
+
+  Future<void> _tryExtractTokenFromPage(String url) async {
+    if (_tokenCaptured) return;
+    if (!url.contains('hrone.cloud')) return;
+
+    const js = r'''
+(function() {
+  const keys = [
+    'token', 'access_token', 'accessToken', 'authToken', 'jwt',
+    'hrone_token', 'hrone_access_token', 'Bearer',
+    'msal.idtoken', 'msal.access.token.keys'
+  ];
+  for (const k of keys) {
+    const v = localStorage.getItem(k) || sessionStorage.getItem(k);
+    if (v && v.length > 20) {
+      FlutterBridge.postMessage(JSON.stringify({source:'storage', key:k, value:v}));
+      return;
+    }
+  }
+  const jwtRegex = /^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/;
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    const v = localStorage.getItem(k);
+    if (v && jwtRegex.test(v)) {
+      FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan', key:k, value:v}));
+      return;
+    }
+  }
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.includes('accesstoken')) {
+      try {
+        const obj = JSON.parse(localStorage.getItem(k));
+        const secret = obj.secret || obj.access_token || obj.token;
+        if (secret && secret.length > 20) {
+          FlutterBridge.postMessage(JSON.stringify({source:'msal', key:k, value:secret}));
+          return;
+        }
+      } catch(_) {}
+    }
+  }
+  const g = window.__HRONE_TOKEN__ || window.hroneToken || window.authToken;
+  if (g) FlutterBridge.postMessage(JSON.stringify({source:'global', key:'window', value:String(g)}));
+})();
+''';
+    try {
+      await _controller.runJavaScript(js);
+    } catch (_) {}
+  }
+
+  // ── Capture token + close ──────────────────────────────────────────────────
 
   Future<void> _captureToken(
     String token, {
@@ -278,7 +426,11 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
             icon: const Icon(Icons.refresh),
             tooltip: 'Reload page',
             onPressed: () {
-              setState(() { _error = null; _tokenCaptured = false; });
+              setState(() {
+                _error = null;
+                _tokenCaptured = false;
+                _statusMsg = '';
+              });
               _controller.loadRequest(Uri.parse(_startUrl));
             },
           ),
@@ -286,7 +438,6 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       ),
       body: Stack(
         children: [
-          // Error state
           if (_error != null)
             Center(
               child: Padding(
@@ -304,7 +455,11 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
                       icon: const Icon(Icons.refresh),
                       label: const Text('Retry'),
                       onPressed: () {
-                        setState(() { _error = null; _tokenCaptured = false; });
+                        setState(() {
+                          _error = null;
+                          _tokenCaptured = false;
+                          _statusMsg = '';
+                        });
                         _controller.loadRequest(Uri.parse(_startUrl));
                       },
                     ),
@@ -315,14 +470,12 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           else
             WebViewWidget(controller: _controller),
 
-          // Loading overlay
           if (_loading && _error == null)
             Container(
               color: Colors.white.withOpacity(0.6),
               child: const Center(child: CircularProgressIndicator()),
             ),
 
-          // Token captured banner
           if (_tokenCaptured)
             Container(
               color: Colors.green.withOpacity(0.85),
@@ -341,6 +494,25 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
                     Text('Returning to app…',
                         style: TextStyle(color: Colors.white70)),
                   ],
+                ),
+              ),
+            ),
+
+          // Status bar showing interceptor activity
+          if (_statusMsg.isNotEmpty && !_tokenCaptured && _error == null)
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                color: Colors.black87,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Text(
+                  _statusMsg,
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ),
