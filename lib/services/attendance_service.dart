@@ -54,6 +54,7 @@ class PrefKeys {
   // Auto-discovered from WebView network interceptor
   static const discoveredApiBase = 'discovered_api_base';
   static const discoveredPunchUrl = 'discovered_punch_url';
+  static const discoveredPunchMethod = 'discovered_punch_method'; // GET/POST/PUT/PATCH
   static const discoveredPunchHeaders = 'discovered_punch_headers';
   static const discoveredPunchBody = 'discovered_punch_body';
 }
@@ -337,7 +338,6 @@ class AttendanceService {
               for (final entry in discovered.entries) {
                 final k = entry.key as String;
                 final v = entry.value as String? ?? '';
-                // Keep all discovered headers EXCEPT Authorization (we use fresh token)
                 if (k.toLowerCase() != 'authorization') {
                   headers[k] = v;
                 }
@@ -352,26 +352,16 @@ class AttendanceService {
             try {
               final template = jsonDecode(discoveredBody) as Map<String, dynamic>;
               body = Map<String, dynamic>.from(template);
-              // Replace punch type values
               for (final k in body.keys.toList()) {
                 final v = body[k]?.toString() ?? '';
                 if (v == 'IN' || v == 'OUT' || v == 'PUNCH_IN' || v == 'PUNCH_OUT' ||
                     v == 'in' || v == 'out' || v == 'punch_in' || v == 'punch_out') {
                   if (type == 'IN') {
-                    if (v.contains('_')) {
-                      body[k] = 'PUNCH_IN';
-                    } else {
-                      body[k] = v == v.toUpperCase() ? 'IN' : 'in';
-                    }
+                    body[k] = v.contains('_') ? 'PUNCH_IN' : (v == v.toUpperCase() ? 'IN' : 'in');
                   } else {
-                    if (v.contains('_')) {
-                      body[k] = 'PUNCH_OUT';
-                    } else {
-                      body[k] = v == v.toUpperCase() ? 'OUT' : 'out';
-                    }
+                    body[k] = v.contains('_') ? 'PUNCH_OUT' : (v == v.toUpperCase() ? 'OUT' : 'out');
                   }
                 }
-                // Update time fields
                 if (k.toLowerCase().contains('time') || k.toLowerCase().contains('date')) {
                   body[k] = k.toLowerCase().contains('date') ? iso.substring(0, 10) : iso;
                 }
@@ -383,36 +373,62 @@ class AttendanceService {
             body = {'punchType': type, 'punchTime': iso};
           }
 
-          var resp = await http.post(
-            Uri.parse(discoveredUrl),
-            headers: headers,
-            body: jsonEncode(body),
-          ).timeout(const Duration(seconds: 15));
+          final encodedBody = jsonEncode(body);
+          final uri = Uri.parse(discoveredUrl);
 
-          if (resp.statusCode == 401) {
-            final fresh = await _getToken(forceRefresh: true);
-            headers['Authorization'] = 'Bearer $fresh';
-            resp = await http.post(
-              Uri.parse(discoveredUrl),
-              headers: headers,
-              body: jsonEncode(body),
-            ).timeout(const Duration(seconds: 15));
+          // Helper: send with a specific HTTP method
+          Future<http.Response> sendWith(String method, String tkn) {
+            final h = Map<String, String>.from(headers)
+              ..['Authorization'] = 'Bearer $tkn';
+            switch (method) {
+              case 'PUT':
+                return http.put(uri, headers: h, body: encodedBody)
+                    .timeout(const Duration(seconds: 15));
+              case 'PATCH':
+                return http.patch(uri, headers: h, body: encodedBody)
+                    .timeout(const Duration(seconds: 15));
+              default: // POST
+                return http.post(uri, headers: h, body: encodedBody)
+                    .timeout(const Duration(seconds: 15));
+            }
           }
 
-          if (resp.statusCode >= 200 && resp.statusCode < 300) {
-            final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
-            await _saveStatus(type, true, msg);
-            return AttendanceResult(success: true, message: msg);
-          }
-          // Non-2xx but not 404 → real error, don't probe further
-          if (resp.statusCode != 404) {
-            final errMsg = 'Punch failed (${resp.statusCode}). '
-                'Open app and punch manually once to re-capture the API endpoint.';
+          // Use saved method if we have it, otherwise try POST → PUT → PATCH
+          final savedMethod = _prefs.getString(PrefKeys.discoveredPunchMethod);
+          final methodsToTry = savedMethod != null
+              ? [savedMethod]
+              : ['POST', 'PUT', 'PATCH'];
+
+          for (final method in methodsToTry) {
+            var resp = await sendWith(method, token);
+
+            // 401 → refresh token and retry same method
+            if (resp.statusCode == 401) {
+              final fresh = await _getToken(forceRefresh: true);
+              resp = await sendWith(method, fresh);
+            }
+
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              // Save the working method so we don't have to probe next time
+              await _prefs.setString(PrefKeys.discoveredPunchMethod, method);
+              final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
+              await _saveStatus(type, true, msg);
+              return AttendanceResult(success: true, message: msg);
+            }
+
+            if (resp.statusCode == 405) continue; // Try next method
+            if (resp.statusCode == 404) {
+              // URL is stale — clear and fall through to probing
+              await _prefs.remove(PrefKeys.discoveredPunchUrl);
+              await _prefs.remove(PrefKeys.discoveredPunchMethod);
+              break;
+            }
+
+            // Any other error (403, 500, etc.) — report it
+            final errMsg = 'Punch failed (${resp.statusCode}): ${resp.body.length > 200 ? resp.body.substring(0, 200) : resp.body}';
             await _saveStatus(type, false, errMsg);
             return AttendanceResult(success: false, message: errMsg);
           }
-          // 404 on discovered URL → URL stale, clear it and fall through to probing
-          await _prefs.remove(PrefKeys.discoveredPunchUrl);
         } catch (_) {
           // Network error → fall through to probing
         }
@@ -439,46 +455,58 @@ class AttendanceService {
         {'punch_type': type.toLowerCase(), 'punch_time': iso},
       ];
 
-      Future<http.Response> doPost(String url, Map<String, dynamic> body,
-              String tkn) =>
-          http.post(
-            Uri.parse(url),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'Authorization': 'Bearer $tkn',
-              'Origin': discoveredBase,
-              'Referer': '$discoveredBase/',
-            },
-            body: jsonEncode(body),
-          ).timeout(const Duration(seconds: 15));
+      Future<http.Response> doRequest(
+              String method, String url, Map<String, dynamic> body, String tkn) {
+        final h = {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': 'Bearer $tkn',
+          'Origin': discoveredBase,
+          'Referer': '$discoveredBase/',
+        };
+        final encoded = jsonEncode(body);
+        final uri = Uri.parse(url);
+        switch (method) {
+          case 'PUT':
+            return http.put(uri, headers: h, body: encoded)
+                .timeout(const Duration(seconds: 15));
+          case 'PATCH':
+            return http.patch(uri, headers: h, body: encoded)
+                .timeout(const Duration(seconds: 15));
+          default:
+            return http.post(uri, headers: h, body: encoded)
+                .timeout(const Duration(seconds: 15));
+        }
+      }
 
       String? lastError;
 
+      outer:
       for (final endpoint in punchEndpoints) {
-        for (final body in bodies) {
-          try {
-            var resp = await doPost(endpoint, body, token);
-            if (resp.statusCode == 401) {
-              final fresh = await _getToken(forceRefresh: true);
-              resp = await doPost(endpoint, body, fresh);
-            }
-            if (resp.statusCode == 404) continue;
-            final ok = resp.statusCode >= 200 && resp.statusCode < 300;
-            if (ok) {
-              // Save this working endpoint for next time
-              await _prefs.setString(PrefKeys.discoveredPunchUrl, endpoint);
-              await _prefs.setString(PrefKeys.discoveredPunchBody, jsonEncode(body));
-              final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
-              await _saveStatus(type, true, msg);
-              return AttendanceResult(success: true, message: msg);
-            } else {
-              lastError = 'Error ${resp.statusCode}: ${resp.body}';
-              break;
-            }
-          } catch (_) {}
+        for (final httpMethod in ['POST', 'PUT', 'PATCH']) {
+          for (final body in bodies) {
+            try {
+              var resp = await doRequest(httpMethod, endpoint, body, token);
+              if (resp.statusCode == 401) {
+                final fresh = await _getToken(forceRefresh: true);
+                resp = await doRequest(httpMethod, endpoint, body, fresh);
+              }
+              if (resp.statusCode == 404 || resp.statusCode == 405) continue;
+              final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+              if (ok) {
+                await _prefs.setString(PrefKeys.discoveredPunchUrl, endpoint);
+                await _prefs.setString(PrefKeys.discoveredPunchMethod, httpMethod);
+                await _prefs.setString(PrefKeys.discoveredPunchBody, jsonEncode(body));
+                final msg = 'Punch $type at $iso${randomize ? ' (±${maxJitter}m)' : ''}';
+                await _saveStatus(type, true, msg);
+                return AttendanceResult(success: true, message: msg);
+              } else {
+                lastError = 'Error ${resp.statusCode}: ${resp.body.length > 200 ? resp.body.substring(0, 200) : resp.body}';
+                break outer;
+              }
+            } catch (_) {}
+          }
         }
-        if (lastError != null && !lastError.startsWith('Error 404')) break;
       }
 
       // All probes failed — tell user to punch from the web app once so

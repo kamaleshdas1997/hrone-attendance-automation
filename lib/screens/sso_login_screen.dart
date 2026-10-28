@@ -258,12 +258,16 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           }
         }
 
-        // Save attendance endpoint when we see one
-        if (method == 'POST' &&
-            (url.contains('attend') ||
-                url.contains('punch') ||
-                url.contains('mark-attendance'))) {
+        // Save attendance endpoint when we see one (any method: POST, PUT, PATCH)
+        final isAttendanceCall = (url.contains('attend') ||
+            url.contains('punch') ||
+            url.contains('mark-attendance') ||
+            url.contains('mark_attendance'));
+        final isWriteMethod = method == 'POST' || method == 'PUT' || method == 'PATCH';
+
+        if (isWriteMethod && isAttendanceCall) {
           widget.prefs.setString(PrefKeys.discoveredPunchUrl, url);
+          widget.prefs.setString(PrefKeys.discoveredPunchMethod, method);
 
           // Save headers map as JSON for the background worker to reuse
           if (headers is Map) {
@@ -277,7 +281,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
             widget.prefs.setString(PrefKeys.discoveredPunchBody, body);
           }
 
-          setState(() => _statusMsg = '✅ Punch endpoint captured!');
+          setState(() => _statusMsg = '✅ Punch endpoint captured! ($method)');
         }
         return;
       }
