@@ -40,13 +40,37 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   String get _domain =>
       widget.prefs.getString(PrefKeys.domain)?.trim() ?? '';
 
-  /// The HROne tenant URL.
+  /// The HROne tenant login URL.
+  ///
+  /// HROne uses a single app at app.hrone.cloud — the "domain" the user enters
+  /// is just their company slug used for the login form, NOT a subdomain.
+  /// The correct login URL is always: https://app.hrone.cloud/login
+  /// (or https://app.hrone.cloud — it redirects to /login automatically).
+  ///
+  /// If the user entered a full URL or subdomain (e.g. "mycompany.hrone.cloud"
+  /// or "https://app.hrone.cloud"), we normalise it.
   String get _startUrl {
     final d = _domain;
-    if (d.isEmpty) return 'https://app.hrone.cloud';
-    // Handle domains that already contain .hrone.cloud
+
+    // If empty, go to the main login page
+    if (d.isEmpty) return 'https://app.hrone.cloud/login';
+
+    // If user pasted a full URL
+    if (d.startsWith('http://') || d.startsWith('https://')) {
+      return d;
+    }
+
+    // If user entered a full hostname that already contains hrone.cloud
+    // (e.g. "mycompany.hrone.cloud" or "app.hrone.cloud")
+    if (d.contains('hrone.cloud')) return 'https://$d/login';
+
+    // If user entered a hostname with dots but no hrone.cloud
+    // (unlikely, but treat as full custom domain)
     if (d.contains('.')) return 'https://$d';
-    return 'https://$d.hrone.cloud';
+
+    // Default: short company slug → use main app login page
+    // Pass domain as query param so HROne can pre-fill the company field
+    return 'https://app.hrone.cloud/login?domain=$d&company=$d';
   }
 
   void _setupWebView() {
@@ -68,11 +92,22 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           },
           onWebResourceError: (err) {
             // Ignore subresource errors; only flag main-frame failures
-            if (err.isForMainFrame == true) {
-              setState(() {
-                _loading = false;
-                _error = 'Page load error: ${err.description}';
-              });
+            // Also ignore 404s on redirect pages — the page itself may still work
+            if (err.isForMainFrame == true && err.errorCode != -2) {
+              // -2 is ERR_FAILED which fires on redirects; ignore it
+              // Only show error for hard failures (no network, SSL, etc.)
+              final code = err.errorCode;
+              final isHardFail = code == -6 ||   // ERR_FILE_NOT_FOUND (true 404)
+                  code == -7 ||   // ERR_TIMED_OUT
+                  code == -105 || // ERR_NAME_NOT_RESOLVED
+                  code == -106;   // ERR_INTERNET_DISCONNECTED
+              if (isHardFail) {
+                setState(() {
+                  _loading = false;
+                  _error = 'Cannot reach HROne login page (${err.description}).\n\n'
+                      'Check your internet connection or verify the domain in Account settings.';
+                });
+              }
             }
           },
         ),
