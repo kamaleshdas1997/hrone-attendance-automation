@@ -63,10 +63,8 @@ class _StatusScreenState extends State<StatusScreen> {
     final outH = widget.prefs.getInt(PrefKeys.punchOutHour) ?? 18;
     final outM = widget.prefs.getInt(PrefKeys.punchOutMinute) ?? 0;
     final enabled = widget.prefs.getBool(PrefKeys.automationEnabled) ?? false;
-
-    final domain = widget.prefs.getString(PrefKeys.domain) ?? '';
-    final username = widget.prefs.getString(PrefKeys.username) ?? '';
-    final configured = domain.isNotEmpty && username.isNotEmpty;
+    final isLoggedIn = (widget.prefs.getString(PrefKeys.loginMethod) ?? '') == 'sso'
+        && (widget.prefs.getString(PrefKeys.authToken) ?? '').isNotEmpty;
 
     return Scaffold(
       body: SingleChildScrollView(
@@ -74,12 +72,15 @@ class _StatusScreenState extends State<StatusScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Employee profile card
+            if (isLoggedIn) _profileCard(context, _svc),
+            if (isLoggedIn) const SizedBox(height: 16),
+
             // Automation status banner
             _banner(
               context: context,
-              active: enabled && configured,
-              domain: domain,
-              username: username,
+              active: enabled && isLoggedIn,
+              svc: _svc,
               inH: inH,
               inM: inM,
               outH: outH,
@@ -199,11 +200,72 @@ class _StatusScreenState extends State<StatusScreen> {
     );
   }
 
+  Widget _profileCard(BuildContext context, AttendanceService svc) {
+    final cs = Theme.of(context).colorScheme;
+    final name = svc.employeeName;
+    final email = svc.employeeEmail;
+    final empId = svc.employeeId;
+    final empCode = svc.employeeCode;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withOpacity(0.4),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.primary.withOpacity(0.2)),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            backgroundColor: cs.primary,
+            radius: 26,
+            child: Text(
+              name.isNotEmpty ? name[0].toUpperCase() : '?',
+              style: TextStyle(
+                  color: cs.onPrimary,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name.isNotEmpty ? name : 'Employee',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 15),
+                ),
+                if (email.isNotEmpty)
+                  Text(email,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: cs.onSurface.withOpacity(0.6))),
+                if (empId.isNotEmpty || empCode.isNotEmpty)
+                  Text(
+                    [
+                      if (empId.isNotEmpty) 'ID: $empId',
+                      if (empCode.isNotEmpty) 'Code: $empCode',
+                    ].join('  •  '),
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurface.withOpacity(0.5)),
+                  ),
+              ],
+            ),
+          ),
+          Icon(Icons.verified_user_outlined,
+              color: cs.primary, size: 20),
+        ],
+      ),
+    );
+  }
+
   Widget _banner({
     required BuildContext context,
     required bool active,
-    required String domain,
-    required String username,
+    required AttendanceService svc,
     required int inH,
     required int inM,
     required int outH,
@@ -251,9 +313,6 @@ class _StatusScreenState extends State<StatusScreen> {
           ),
           if (active) ...[
             const SizedBox(height: 10),
-            Text('Account:  $username @ $domain.hrone.cloud',
-                style: const TextStyle(color: Colors.white70, fontSize: 12)),
-            const SizedBox(height: 4),
             Text('Punch-In:   ${t(inH, inM)}',
                 style: const TextStyle(color: Colors.white, fontSize: 14)),
             Text('Punch-Out: ${t(outH, outM)}',
@@ -261,9 +320,7 @@ class _StatusScreenState extends State<StatusScreen> {
           ] else ...[
             const SizedBox(height: 6),
             Text(
-              domain.isEmpty
-                  ? 'Go to Account tab to add credentials.'
-                  : 'Go to Schedule tab and enable automation.',
+              'Go to Schedule tab and enable automation.',
               style: TextStyle(color: cs.outline, fontSize: 13),
             ),
           ],

@@ -56,11 +56,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (confirm != true || !mounted) return;
 
-    // Clear all auth data
+    // Clear all auth + profile data
     await prefs.remove(PrefKeys.authToken);
     await prefs.remove(PrefKeys.refreshToken);
     await prefs.remove(PrefKeys.tokenExpiry);
     await prefs.remove(PrefKeys.loginMethod);
+    await prefs.remove(PrefKeys.employeeId);
+    await prefs.remove(PrefKeys.employeeCode);
+    await prefs.remove(PrefKeys.employeeName);
+    await prefs.remove(PrefKeys.employeeEmail);
     await prefs.remove(PrefKeys.discoveredPunchUrl);
     await prefs.remove(PrefKeys.discoveredPunchMethod);
     await prefs.remove(PrefKeys.discoveredPunchHeaders);

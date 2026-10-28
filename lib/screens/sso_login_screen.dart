@@ -34,6 +34,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   // Login state
   bool _tokenCaptured = false;       // Auth token captured from API headers
   bool _punchCaptured = false;       // Punch endpoint captured
+  bool _autoPunchAttempted = false;  // Auto-punch JS fired once
   String _statusMsg = '';
 
   @override
@@ -44,17 +45,8 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
     _setupWebView();
   }
 
-  String get _domain =>
-      widget.prefs.getString(PrefKeys.domain)?.trim() ?? '';
-
-  String get _startUrl {
-    final d = _domain;
-    if (d.isEmpty) return 'https://app.hrone.cloud/login';
-    if (d.startsWith('http://') || d.startsWith('https://')) return d;
-    if (d.contains('hrone.cloud')) return 'https://$d/login';
-    if (d.contains('.')) return 'https://$d';
-    return 'https://app.hrone.cloud/login?domain=$d&company=$d';
-  }
+  // Always start at the HROne SSO login page
+  static const _startUrl = 'https://app.hrone.cloud/login';
 
   void _setupWebView() {
     _controller = WebViewController()
@@ -335,9 +327,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
     } catch (_) {}
   }
 
-  // ── Capture token silently (don't close screen) ────────────────────────────
-  // Unlike the old _captureToken, this does NOT close the WebView.
-  // The screen stays open so the user can navigate to Attendance and punch once.
+  // ── Capture token + close screen immediately ──────────────────────────────
 
   Future<void> _captureTokenSilently(
     String token, {
@@ -354,12 +344,12 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       expiresInSeconds: expiresIn ?? 3600,
     );
 
+    // Fetch employee profile in background; don't wait — close first
+    svc.fetchAndSaveEmployeeProfile(token).catchError((_) {});
+
+    // Return to the main app immediately — no need to stay on HROne web
     if (mounted) {
-      setState(() {
-        _statusMsg = _punchCaptured
-            ? '✅ Logged in. Punch endpoint already captured — tap Done.'
-            : '✅ Logged in!\n👉 Now go to Attendance in the web app and tap Punch In once.';
-      });
+      Navigator.of(context).pop(true);
     }
   }
 
