@@ -23,8 +23,10 @@ class _StatusScreenState extends State<StatusScreen> {
       _manualLoading = true;
       _manualResult = null;
     });
-    final result =
-        type == 'IN' ? await _svc.punchIn() : await _svc.punchOut();
+    // manual: true → bypasses active-day check so weekend taps still work
+    final result = type == 'IN'
+        ? await _svc.punchIn(manual: true)
+        : await _svc.punchOut(manual: true);
     setState(() {
       _manualLoading = false;
       _manualSuccess = result.success;

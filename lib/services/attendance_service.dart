@@ -309,25 +309,28 @@ class AttendanceService {
 
   // ---- Attendance API ------------------------------------------------------
 
-  Future<AttendanceResult> punchIn() => _punch('IN');
-  Future<AttendanceResult> punchOut() => _punch('OUT');
+  /// Manual punch — always punches regardless of active-day setting.
+  Future<AttendanceResult> punchIn({bool manual = false}) => _punch('IN', skipDayCheck: manual);
+  Future<AttendanceResult> punchOut({bool manual = false}) => _punch('OUT', skipDayCheck: manual);
 
   // Real HROne punch endpoint (discovered from the app network traffic).
   static const _punchUrl =
       '$_baseUrl/api/timeoffice/mobile/checkin/Attendance/Request';
 
-  Future<AttendanceResult> _punch(String type) async {
-    if (!isActiveToday) {
+  Future<AttendanceResult> _punch(String type, {bool skipDayCheck = false}) async {
+    // Active-day check — skipped for manual punches
+    if (!skipDayCheck && !isActiveToday) {
       final msg =
           'Skipped — today (${_weekdayName(DateTime.now().weekday)}) is not an active day.';
-      await _saveStatus(type, true, msg);
+      await _saveStatus(type, true, 'skipped: $msg');
       return AttendanceResult(success: true, message: msg);
     }
 
     try {
       var token = await _getToken();
 
-      final randomize = _prefs.getBool(PrefKeys.randomizeEnabled) ?? true;
+      // Manual punch uses exact current time; automated adds optional jitter
+      final randomize = !skipDayCheck && (_prefs.getBool(PrefKeys.randomizeEnabled) ?? true);
       final maxJitter = _prefs.getInt(PrefKeys.randomizeMinutes) ?? 5;
       DateTime now = DateTime.now();
       if (randomize) {
@@ -338,10 +341,14 @@ class AttendanceService {
       final punchTime =
           '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}T${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-      // employeeId saved after login; fall back to 0 (API will reject with a
-      // clear error rather than silently succeeding for wrong employee)
+      // employeeId is required — fail clearly if it was never fetched
       final empIdStr = _prefs.getString(PrefKeys.employeeId) ?? '';
       final empId = int.tryParse(empIdStr) ?? 0;
+      if (empId == 0) {
+        const msg = 'Employee ID not set — sign out and sign in again to reload your profile.';
+        await _saveStatus(type, false, msg);
+        return AttendanceResult(success: false, message: msg);
+      }
 
       final body = <String, dynamic>{
         'requestType': 'A',
@@ -362,7 +369,8 @@ class AttendanceService {
         'punchType': null,
       };
 
-      Map<String, String> _headers(String tkn) => {
+      // Build headers as a plain local function (no leading _ to avoid Dart lint warning)
+      Map<String, String> buildHeaders(String tkn) => {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'Authorization': 'Bearer $tkn',
@@ -373,7 +381,7 @@ class AttendanceService {
       var resp = await http
           .post(
             Uri.parse(_punchUrl),
-            headers: _headers(token),
+            headers: buildHeaders(token),
             body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 20));
@@ -384,7 +392,7 @@ class AttendanceService {
         resp = await http
             .post(
               Uri.parse(_punchUrl),
-              headers: _headers(token),
+              headers: buildHeaders(token),
               body: jsonEncode(body),
             )
             .timeout(const Duration(seconds: 20));

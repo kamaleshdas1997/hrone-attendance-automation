@@ -20,15 +20,18 @@ void callbackDispatcher() {
     try {
       if (taskName == AttendanceService.kPunchInTask) {
         // ── Perform punch-in ──────────────────────────────────────────────
-        final result = await service.punchIn();
+        final result = await service.punchIn();  // automated — respects active-day check
         final loginExpired = result.message.contains('Login expired');
+        final skipped = result.message.startsWith('Skipped');
         await notif.show(
           id: 1,
           title: loginExpired
               ? '🔑 HROne Login Expired'
-              : result.success
-                  ? '✅ Punch-In Done'
-                  : '❌ Punch-In Failed',
+              : skipped
+                  ? '⏭️ Punch-In Skipped'
+                  : result.success
+                      ? '✅ Punch-In Done'
+                      : '❌ Punch-In Failed',
           body: loginExpired
               ? 'Tap to sign in again — attendance not marked.'
               : result.message,
