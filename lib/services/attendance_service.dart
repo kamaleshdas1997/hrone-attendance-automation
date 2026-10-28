@@ -16,9 +16,14 @@ class AttendanceResult {
 
 /// Thrown when the server requires an OTP before issuing a token.
 class OtpRequiredException implements Exception {
-  /// Temporary session identifier returned by the server's first-step response.
   final String sessionToken;
   const OtpRequiredException(this.sessionToken);
+}
+
+/// Thrown when SSO session has expired and silent refresh failed.
+/// The user must log in again via WebView.
+class LoginExpiredException implements Exception {
+  const LoginExpiredException();
 }
 
 // ---------------------------------------------------------------------------
@@ -37,7 +42,10 @@ class PrefKeys {
   static const activeDays = 'active_days'; // comma-separated ints: 1=Mon…7=Sun
   static const randomizeEnabled = 'randomize_enabled';
   static const randomizeMinutes = 'randomize_minutes'; // default 5
-  static const totpSecret = 'hrone_totp_secret'; // base32 secret from authenticator setup
+  static const totpSecret      = 'hrone_totp_secret';   // base32 secret from authenticator setup
+  static const refreshToken    = 'hrone_refresh_token'; // OAuth refresh token from WebView login
+  static const tokenExpiry     = 'hrone_token_expiry';  // access token expiry (ms since epoch)
+  static const loginMethod     = 'hrone_login_method';  // 'password' | 'sso'
   static const lastPunchInTime = 'last_punch_in_time';
   static const lastPunchOutTime = 'last_punch_out_time';
   static const lastPunchInStatus = 'last_punch_in_status';
@@ -124,20 +132,97 @@ class AttendanceService {
   /// Returns a bearer token.
   /// Throws [OtpRequiredException] if the server requires a 2FA OTP first.
   /// Throws [Exception] on credential failure or network error.
+  // ── Token helpers ────────────────────────────────────────────────────────
+
+  bool get _accessTokenValid {
+    final expiry = _prefs.getInt(PrefKeys.tokenExpiry) ?? 0;
+    // Consider expired 2 min early to avoid edge cases
+    return expiry > DateTime.now().millisecondsSinceEpoch + 120000;
+  }
+
+  /// Saves an SSO access token + optional refresh token received from WebView.
+  Future<void> saveSsoTokens({
+    required String accessToken,
+    String? refreshToken,
+    int? expiresInSeconds,
+  }) async {
+    await _prefs.setString(PrefKeys.authToken, accessToken);
+    await _prefs.setString(PrefKeys.loginMethod, 'sso');
+    if (refreshToken != null && refreshToken.isNotEmpty) {
+      await _prefs.setString(PrefKeys.refreshToken, refreshToken);
+    }
+    final expiry = DateTime.now().millisecondsSinceEpoch +
+        ((expiresInSeconds ?? 3600) * 1000);
+    await _prefs.setInt(PrefKeys.tokenExpiry, expiry);
+  }
+
+  /// Tries to get a fresh access token using the stored refresh token.
+  /// Returns null if no refresh token or refresh fails.
+  Future<String?> _tryRefreshToken() async {
+    final rt = _prefs.getString(PrefKeys.refreshToken);
+    if (rt == null || rt.isEmpty) return null;
+
+    // Try HROne's token refresh endpoint
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/v1/auth/refresh-token'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refreshToken': rt}),
+      ).timeout(const Duration(seconds: 15));
+
+      if (resp.statusCode == 200) {
+        final json = jsonDecode(resp.body) as Map<String, dynamic>;
+        final token = json['data']?['token'] ??
+            json['data']?['accessToken'] ??
+            json['token'] ??
+            json['accessToken'];
+        final newRt = json['data']?['refreshToken'] ??
+            json['refreshToken'];
+        final expiresIn = json['data']?['expiresIn'] ??
+            json['expiresIn'] ?? 3600;
+        if (token != null) {
+          await saveSsoTokens(
+            accessToken: token as String,
+            refreshToken: newRt as String?,
+            expiresInSeconds: expiresIn as int?,
+          );
+          return token;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<String> _getToken({bool forceRefresh = false}) async {
+    final loginMethod = _prefs.getString(PrefKeys.loginMethod) ?? 'password';
+
+    // ── SSO path ─────────────────────────────────────────────────────────
+    if (loginMethod == 'sso') {
+      final cached = _prefs.getString(PrefKeys.authToken) ?? '';
+
+      // Use cached token if still valid
+      if (!forceRefresh && cached.isNotEmpty && _accessTokenValid) {
+        return cached;
+      }
+
+      // Try silent refresh
+      final refreshed = await _tryRefreshToken();
+      if (refreshed != null) return refreshed;
+
+      // Refresh token also expired → signal login required
+      throw LoginExpiredException();
+    }
+
+    // ── Password path ─────────────────────────────────────────────────────
     final cached = _prefs.getString(PrefKeys.authToken);
     if (cached != null && cached.isNotEmpty && !forceRefresh) return cached;
 
-    // Generate a fresh TOTP code right now from the stored secret
     final totp = _currentTotp();
-
-    final uri = Uri.parse('$_baseUrl/api/v1/auth/login');
     final body = <String, dynamic>{
       'domain': domain,
       'username': username,
       'password': password,
     };
-    // Include live TOTP code if secret is configured
     if (totp.isNotEmpty) {
       body['mfaCode'] = totp;
       body['totpCode'] = totp;
@@ -146,7 +231,7 @@ class AttendanceService {
 
     final resp = await http
         .post(
-          uri,
+          Uri.parse('$_baseUrl/api/v1/auth/login'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode(body),
         )
@@ -162,7 +247,7 @@ class AttendanceService {
         throw Exception('Login response did not contain a token.\n${resp.body}');
       }
       await _prefs.setString(PrefKeys.authToken, token as String);
-      return token;
+      return token as String;
     } else {
       throw Exception('Login failed (${resp.statusCode}): ${resp.body}');
     }
@@ -226,6 +311,10 @@ class AttendanceService {
           : 'Error ${resp.statusCode}: ${resp.body}';
       await _saveStatus(type, ok, msg);
       return AttendanceResult(success: ok, message: msg);
+    } on LoginExpiredException {
+      const msg = 'Login expired — open the app to sign in again.';
+      await _saveStatus(type, false, msg);
+      return AttendanceResult(success: false, message: msg);
     } catch (e) {
       final msg = e.toString();
       await _saveStatus(type, false, msg);

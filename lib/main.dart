@@ -20,17 +20,29 @@ void callbackDispatcher() {
     try {
       if (taskName == AttendanceService.kPunchInTask) {
         final result = await service.punchIn();
+        final loginExpired = result.message.contains('Login expired');
         await notif.show(
           id: 1,
-          title: result.success ? '✅ Punch-In Done' : '❌ Punch-In Failed',
-          body: result.message,
+          title: loginExpired
+              ? '🔑 HROne Login Expired'
+              : result.success ? '✅ Punch-In Done' : '❌ Punch-In Failed',
+          body: loginExpired
+              ? 'Tap to sign in again — attendance not marked.'
+              : result.message,
+          isLoginExpired: loginExpired,
         );
       } else if (taskName == AttendanceService.kPunchOutTask) {
         final result = await service.punchOut();
+        final loginExpired = result.message.contains('Login expired');
         await notif.show(
           id: 2,
-          title: result.success ? '✅ Punch-Out Done' : '❌ Punch-Out Failed',
-          body: result.message,
+          title: loginExpired
+              ? '🔑 HROne Login Expired'
+              : result.success ? '✅ Punch-Out Done' : '❌ Punch-Out Failed',
+          body: loginExpired
+              ? 'Tap to sign in again — attendance not marked.'
+              : result.message,
+          isLoginExpired: loginExpired,
         );
       }
     } catch (e) {
@@ -51,14 +63,9 @@ void callbackDispatcher() {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Workmanager for background tasks.
-  // Must complete before runApp so the callback dispatcher is registered.
   try {
     await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
-  } catch (_) {
-    // Workmanager init failure is non-fatal — app still opens, background
-    // tasks won't fire until the user saves the schedule again.
-  }
+  } catch (_) {}
 
   runApp(const HROneApp());
 }

@@ -16,6 +16,8 @@ dependencies:
   intl: ^0.19.0
   otp: ^3.1.4              # TOTP code generation from secret key
   mobile_scanner: ^5.2.3  # QR code scanner for TOTP setup
+  webview_flutter: ^4.8.0  # Microsoft SSO WebView login
+  webview_flutter_android: ^3.16.0  # Android WebView implementation
 
 dev_dependencies:
   flutter_test:
