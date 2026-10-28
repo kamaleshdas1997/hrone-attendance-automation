@@ -5,13 +5,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/attendance_service.dart';
 
-/// Opens a WebView that loads the HROne Microsoft login page.
+/// Opens a WebView for HROne Microsoft SSO login.
 ///
-/// Extended behaviour (v2):
-///   • Intercepts every XHR / fetch the page makes via JS monkey-patching
-///   • Captures the real punch endpoint URL + auth headers automatically
-///   • Saves captured endpoint + token to SharedPreferences so the background
-///     worker can call the exact same URL with the exact same headers
+/// Flow:
+///   1. User taps "Sign in with Microsoft" → WebView loads HROne login
+///   2. User completes Microsoft MFA in the WebView
+///   3. JS interceptor patches XHR + fetch — every API call is reported to Flutter
+///   4. Token is captured from API request headers (Authorization: Bearer ...)
+///   5. WebView stays open — banner asks user to go to Attendance and tap Punch
+///   6. When user taps Punch in the web app, the interceptor captures the real
+///      punch endpoint URL + HTTP method + headers + body
+///   7. "Punch endpoint captured!" banner shows → user taps Done → screen closes
+///
+/// This one-time setup lets background punches work forever without any API guessing.
 class SsoLoginScreen extends StatefulWidget {
   final SharedPreferences prefs;
   const SsoLoginScreen({super.key, required this.prefs});
@@ -24,12 +30,17 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   late final WebViewController _controller;
   bool _loading = true;
   String? _error;
-  bool _tokenCaptured = false;
+
+  // Login state
+  bool _tokenCaptured = false;       // Auth token captured from API headers
+  bool _punchCaptured = false;       // Punch endpoint captured
   String _statusMsg = '';
 
   @override
   void initState() {
     super.initState();
+    // Check if punch endpoint was already captured in a previous session
+    _punchCaptured = (widget.prefs.getString(PrefKeys.discoveredPunchUrl) ?? '').isNotEmpty;
     _setupWebView();
   }
 
@@ -54,7 +65,6 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           onPageStarted: (_) => setState(() => _loading = true),
           onPageFinished: (url) async {
             setState(() => _loading = false);
-            // Inject network interceptor on every page load
             await _injectNetworkInterceptor();
             if (!_tokenCaptured) {
               await _tryExtractTokenFromPage(url);
@@ -67,14 +77,14 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           onWebResourceError: (err) {
             if (err.isForMainFrame == true) {
               final code = err.errorCode;
-              final isHardFail = code == -6 || code == -7 ||
-                  code == -105 || code == -106;
+              final isHardFail =
+                  code == -6 || code == -7 || code == -105 || code == -106;
               if (isHardFail) {
                 setState(() {
                   _loading = false;
                   _error =
                       'Cannot reach HROne login page (${err.description}).\n\n'
-                      'Check your internet connection or verify your domain in Account settings.';
+                      'Check your internet connection or verify the domain in Account settings.';
                 });
               }
             }
@@ -89,9 +99,6 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   }
 
   // ── Network interceptor ────────────────────────────────────────────────────
-  // Monkey-patches XMLHttpRequest and fetch so we can see every API call the
-  // HROne web app makes. We look for attendance/punch calls and capture the
-  // URL + Authorization header automatically.
 
   Future<void> _injectNetworkInterceptor() async {
     const js = r'''
@@ -99,7 +106,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   if (window.__flutterInterceptorInstalled) return;
   window.__flutterInterceptorInstalled = true;
 
-  // ── XHR interceptor ──────────────────────────────────────────────────────
+  // XHR interceptor
   const OrigXHR = window.XMLHttpRequest;
   function PatchedXHR() {
     const xhr = new OrigXHR();
@@ -109,8 +116,8 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
 
     const origOpen = xhr.open.bind(xhr);
     xhr.open = function(method, url) {
-      capturedMethod = method;
-      capturedUrl = url;
+      capturedMethod = method ? method.toUpperCase() : '';
+      capturedUrl = url || '';
       return origOpen(method, url);
     };
 
@@ -122,55 +129,35 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
 
     const origSend = xhr.send.bind(xhr);
     xhr.send = function(body) {
-      // Report ALL API calls so Flutter can see them
       try {
         FlutterBridge.postMessage(JSON.stringify({
           type: 'xhr',
           method: capturedMethod,
           url: capturedUrl,
           headers: capturedHeaders,
-          body: (typeof body === 'string') ? body : '',
-          status: 0
+          body: (typeof body === 'string') ? body : ''
         }));
       } catch(_) {}
-
-      // Hook into load to capture response status
-      xhr.addEventListener('load', function() {
-        try {
-          if (capturedUrl && (
-            capturedUrl.includes('attend') ||
-            capturedUrl.includes('punch') ||
-            capturedUrl.includes('mark')
-          )) {
-            FlutterBridge.postMessage(JSON.stringify({
-              type: 'xhr_response',
-              method: capturedMethod,
-              url: capturedUrl,
-              headers: capturedHeaders,
-              body: (typeof body === 'string') ? body : '',
-              status: xhr.status,
-              responseText: xhr.responseText ? xhr.responseText.substring(0, 500) : ''
-            }));
-          }
-        } catch(_) {}
-      });
-
       return origSend(body);
     };
-
     return xhr;
   }
   PatchedXHR.prototype = OrigXHR.prototype;
   window.XMLHttpRequest = PatchedXHR;
 
-  // ── Fetch interceptor ─────────────────────────────────────────────────────
+  // Fetch interceptor
   const origFetch = window.fetch.bind(window);
   window.fetch = async function(input, init) {
     const url = (typeof input === 'string') ? input : (input && input.url) || '';
-    const method = (init && init.method) || 'GET';
-    const headers = (init && init.headers) || {};
-
-    // Report ALL fetch calls
+    const method = ((init && init.method) || 'GET').toUpperCase();
+    let headers = {};
+    if (init && init.headers) {
+      if (typeof init.headers.forEach === 'function') {
+        init.headers.forEach((v, k) => { headers[k] = v; });
+      } else {
+        headers = Object.assign({}, init.headers);
+      }
+    }
     try {
       FlutterBridge.postMessage(JSON.stringify({
         type: 'fetch',
@@ -180,30 +167,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
         body: (init && typeof init.body === 'string') ? init.body : ''
       }));
     } catch(_) {}
-
-    const response = await origFetch(input, init);
-
-    // Clone and report attendance-related responses
-    try {
-      if (url && (url.includes('attend') || url.includes('punch') || url.includes('mark'))) {
-        const clone = response.clone();
-        clone.text().then(text => {
-          try {
-            FlutterBridge.postMessage(JSON.stringify({
-              type: 'fetch_response',
-              method: method,
-              url: url,
-              headers: headers,
-              body: (init && typeof init.body === 'string') ? init.body : '',
-              status: response.status,
-              responseText: text.substring(0, 500)
-            }));
-          } catch(_) {}
-        });
-      }
-    } catch(_) {}
-
-    return response;
+    return origFetch(input, init);
   };
 })();
 ''';
@@ -219,90 +183,73 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       final map = jsonDecode(message) as Map<String, dynamic>;
       final type = map['type'] as String? ?? '';
 
-      // ── Handle all API call captures ─────────────────────────────────────
       if (type == 'xhr' || type == 'fetch') {
-        final url = map['url'] as String? ?? '';
+        final url = (map['url'] as String? ?? '').trim();
+        final method = (map['method'] as String? ?? 'POST').toUpperCase();
         final headers = map['headers'];
-        final method = (map['method'] as String? ?? '').toUpperCase();
+        final body = map['body'] as String? ?? '';
 
-        // Save API base URL (first non-microsoft, non-login API call)
+        // ── Capture auth token from any API call header ───────────────────
+        if (!_tokenCaptured && headers is Map) {
+          final auth = _findHeader(headers, [
+            'Authorization', 'authorization',
+            'x-auth-token', 'X-Auth-Token',
+            'x-access-token', 'X-Access-Token',
+          ]);
+          if (auth != null && auth.isNotEmpty) {
+            final token = auth.startsWith('Bearer ') ? auth.substring(7) : auth;
+            if (token.length > 20) {
+              _captureTokenSilently(token);
+            }
+          }
+        }
+
+        // ── Save API base URL ─────────────────────────────────────────────
         if (url.isNotEmpty &&
             url.startsWith('https://') &&
             !url.contains('microsoft') &&
             !url.contains('microsoftonline') &&
             !url.contains('login.') &&
-            url.contains('/api/')) {
-          // Extract base URL (scheme + host)
+            url.contains('/api')) {
           final uri = Uri.tryParse(url);
           if (uri != null) {
             final base = '${uri.scheme}://${uri.host}';
             widget.prefs.setString(PrefKeys.discoveredApiBase, base);
-            setState(() => _statusMsg = 'API discovered: ${uri.host}');
           }
         }
 
-        // Extract auth token from headers
-        if (!_tokenCaptured && headers is Map) {
-          final auth = headers['Authorization'] as String? ??
-              headers['authorization'] as String? ??
-              headers['x-auth-token'] as String? ??
-              headers['X-Auth-Token'] as String?;
-
-          if (auth != null && auth.isNotEmpty) {
-            final token = auth.startsWith('Bearer ')
-                ? auth.substring(7)
-                : auth;
-            if (token.length > 20) {
-              _captureToken(token);
-            }
-          }
-        }
-
-        // Save attendance endpoint when we see one (any method: POST, PUT, PATCH)
-        final isAttendanceCall = (url.contains('attend') ||
+        // ── Capture punch endpoint ────────────────────────────────────────
+        final isAttendanceCall = url.contains('attend') ||
             url.contains('punch') ||
             url.contains('mark-attendance') ||
-            url.contains('mark_attendance'));
-        final isWriteMethod = method == 'POST' || method == 'PUT' || method == 'PATCH';
+            url.contains('mark_attendance');
+        final isWriteMethod =
+            method == 'POST' || method == 'PUT' || method == 'PATCH';
 
-        if (isWriteMethod && isAttendanceCall) {
+        if (isWriteMethod && isAttendanceCall && url.isNotEmpty) {
           widget.prefs.setString(PrefKeys.discoveredPunchUrl, url);
           widget.prefs.setString(PrefKeys.discoveredPunchMethod, method);
 
-          // Save headers map as JSON for the background worker to reuse
           if (headers is Map) {
-            final headersJson = jsonEncode(headers);
-            widget.prefs.setString(PrefKeys.discoveredPunchHeaders, headersJson);
+            widget.prefs.setString(
+                PrefKeys.discoveredPunchHeaders, jsonEncode(headers));
           }
-
-          // Save request body template
-          final body = map['body'] as String? ?? '';
           if (body.isNotEmpty) {
             widget.prefs.setString(PrefKeys.discoveredPunchBody, body);
           }
 
-          setState(() => _statusMsg = '✅ Punch endpoint captured! ($method)');
+          setState(() {
+            _punchCaptured = true;
+            _statusMsg = '✅ Punch endpoint captured! ($method)\nTap Done — background punches will now work.';
+          });
         }
         return;
       }
 
-      // ── Handle xhr_response / fetch_response (attendance calls) ──────────
-      if (type == 'xhr_response' || type == 'fetch_response') {
-        final url = map['url'] as String? ?? '';
-        final status = map['status'] as int? ?? 0;
-        if (url.isNotEmpty) {
-          widget.prefs.setString(PrefKeys.discoveredPunchUrl, url);
-          setState(() =>
-              _statusMsg = '📡 Punch API: ${Uri.parse(url).path} ($status)');
-        }
-        return;
-      }
-
-      // ── Handle token value messages ───────────────────────────────────────
+      // ── localStorage / global token messages ─────────────────────────────
       if (_tokenCaptured) return;
       final value = map['value'] as String? ?? '';
       if (value.isEmpty) return;
-
       String token = value;
       try {
         final inner = jsonDecode(value) as Map<String, dynamic>;
@@ -311,9 +258,16 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
             inner['secret'] as String? ??
             value;
       } catch (_) {}
-
-      _captureToken(token);
+      _captureTokenSilently(token);
     } catch (_) {}
+  }
+
+  String? _findHeader(Map headers, List<String> names) {
+    for (final name in names) {
+      final v = headers[name];
+      if (v != null && (v as String).isNotEmpty) return v;
+    }
+    return null;
   }
 
   // ── Token extraction from URL ──────────────────────────────────────────────
@@ -326,10 +280,9 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
       final token = p['token'] ?? p['access_token'] ?? p['accessToken'] ??
           p['jwt'] ?? p['id_token'];
       final refreshToken = p['refresh_token'] ?? p['refreshToken'];
-      final expiresIn =
-          int.tryParse(p['expires_in'] ?? p['expiresIn'] ?? '');
+      final expiresIn = int.tryParse(p['expires_in'] ?? p['expiresIn'] ?? '');
       if (token != null && token.isNotEmpty) {
-        _captureToken(token, refreshToken: refreshToken, expiresIn: expiresIn);
+        _captureTokenSilently(token, refreshToken: refreshToken, expiresIn: expiresIn);
       }
     } catch (_) {}
   }
@@ -342,15 +295,12 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
 
     const js = r'''
 (function() {
-  const keys = [
-    'token', 'access_token', 'accessToken', 'authToken', 'jwt',
-    'hrone_token', 'hrone_access_token', 'Bearer',
-    'msal.idtoken', 'msal.access.token.keys'
-  ];
+  const keys = ['token','access_token','accessToken','authToken','jwt',
+    'hrone_token','hrone_access_token','Bearer','msal.idtoken'];
   for (const k of keys) {
     const v = localStorage.getItem(k) || sessionStorage.getItem(k);
     if (v && v.length > 20) {
-      FlutterBridge.postMessage(JSON.stringify({source:'storage', key:k, value:v}));
+      FlutterBridge.postMessage(JSON.stringify({source:'storage',key:k,value:v}));
       return;
     }
   }
@@ -359,7 +309,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
     const k = localStorage.key(i);
     const v = localStorage.getItem(k);
     if (v && jwtRegex.test(v)) {
-      FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan', key:k, value:v}));
+      FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan',key:k,value:v}));
       return;
     }
   }
@@ -370,14 +320,14 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
         const obj = JSON.parse(localStorage.getItem(k));
         const secret = obj.secret || obj.access_token || obj.token;
         if (secret && secret.length > 20) {
-          FlutterBridge.postMessage(JSON.stringify({source:'msal', key:k, value:secret}));
+          FlutterBridge.postMessage(JSON.stringify({source:'msal',key:k,value:secret}));
           return;
         }
       } catch(_) {}
     }
   }
   const g = window.__HRONE_TOKEN__ || window.hroneToken || window.authToken;
-  if (g) FlutterBridge.postMessage(JSON.stringify({source:'global', key:'window', value:String(g)}));
+  if (g) FlutterBridge.postMessage(JSON.stringify({source:'global',key:'window',value:String(g)}));
 })();
 ''';
     try {
@@ -385,9 +335,11 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
     } catch (_) {}
   }
 
-  // ── Capture token + close ──────────────────────────────────────────────────
+  // ── Capture token silently (don't close screen) ────────────────────────────
+  // Unlike the old _captureToken, this does NOT close the WebView.
+  // The screen stays open so the user can navigate to Attendance and punch once.
 
-  Future<void> _captureToken(
+  Future<void> _captureTokenSilently(
     String token, {
     String? refreshToken,
     int? expiresIn,
@@ -403,15 +355,16 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
     );
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Signed in successfully!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      await Future.delayed(const Duration(milliseconds: 600));
-      if (mounted) Navigator.of(context).pop(true);
+      setState(() {
+        _statusMsg = _punchCaptured
+            ? '✅ Logged in. Punch endpoint already captured — tap Done.'
+            : '✅ Logged in!\n👉 Now go to Attendance in the web app and tap Punch In once.';
+      });
     }
+  }
+
+  void _closeScreen() {
+    Navigator.of(context).pop(_tokenCaptured);
   }
 
   // ── UI ─────────────────────────────────────────────────────────────────────
@@ -419,6 +372,7 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Sign in with Microsoft'),
@@ -426,22 +380,32 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
         backgroundColor: cs.primary,
         foregroundColor: cs.onPrimary,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Reload page',
-            onPressed: () {
-              setState(() {
-                _error = null;
-                _tokenCaptured = false;
-                _statusMsg = '';
-              });
-              _controller.loadRequest(Uri.parse(_startUrl));
-            },
-          ),
+          if (_tokenCaptured)
+            TextButton(
+              onPressed: _closeScreen,
+              child: const Text('Done',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16)),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Reload page',
+              onPressed: () {
+                setState(() {
+                  _error = null;
+                  _statusMsg = '';
+                });
+                _controller.loadRequest(Uri.parse(_startUrl));
+              },
+            ),
         ],
       ),
       body: Stack(
         children: [
+          // Error state
           if (_error != null)
             Center(
               child: Padding(
@@ -461,7 +425,6 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
                       onPressed: () {
                         setState(() {
                           _error = null;
-                          _tokenCaptured = false;
                           _statusMsg = '';
                         });
                         _controller.loadRequest(Uri.parse(_startUrl));
@@ -474,49 +437,55 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
           else
             WebViewWidget(controller: _controller),
 
+          // Loading spinner
           if (_loading && _error == null)
             Container(
               color: Colors.white.withOpacity(0.6),
               child: const Center(child: CircularProgressIndicator()),
             ),
 
-          if (_tokenCaptured)
-            Container(
-              color: Colors.green.withOpacity(0.85),
-              child: const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.check_circle, size: 64, color: Colors.white),
-                    SizedBox(height: 12),
-                    Text('Login successful!',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold)),
-                    SizedBox(height: 6),
-                    Text('Returning to app…',
-                        style: TextStyle(color: Colors.white70)),
-                  ],
-                ),
-              ),
-            ),
-
-          // Status bar showing interceptor activity
-          if (_statusMsg.isNotEmpty && !_tokenCaptured && _error == null)
+          // Status banner — shown after login and after punch capture
+          if (_statusMsg.isNotEmpty && _error == null)
             Positioned(
               bottom: 0,
               left: 0,
               right: 0,
-              child: Container(
-                color: Colors.black87,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text(
-                  _statusMsg,
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              child: Material(
+                color: _punchCaptured ? Colors.green.shade800 : Colors.blue.shade800,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _punchCaptured ? Icons.check_circle : Icons.info_outline,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _statusMsg,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              height: 1.4),
+                        ),
+                      ),
+                      if (_tokenCaptured)
+                        TextButton(
+                          onPressed: _closeScreen,
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.white,
+                            backgroundColor: Colors.white24,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                          ),
+                          child: const Text('Done',
+                              style: TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
