@@ -52,14 +52,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   Future<void> _saveSchedule() async {
-    final domain = widget.prefs.getString(PrefKeys.domain) ?? '';
-    final username = widget.prefs.getString(PrefKeys.username) ?? '';
-    if (domain.isEmpty || username.isEmpty) {
-      setState(() {
-        _feedback = '⚠️ Please save your HROne credentials first (Account tab).';
-      });
-      return;
-    }
     if (_activeDays.isEmpty) {
       setState(() {
         _feedback = '⚠️ Select at least one active day.';
@@ -106,12 +98,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Attendance Schedule'),
-        centerTitle: false,
-        backgroundColor: cs.primary,
-        foregroundColor: cs.onPrimary,
-      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(

@@ -69,19 +69,6 @@ class _StatusScreenState extends State<StatusScreen> {
     final configured = domain.isNotEmpty && username.isNotEmpty;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Status'),
-        centerTitle: false,
-        backgroundColor: cs.primary,
-        foregroundColor: cs.onPrimary,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-            onPressed: () => setState(() {}),
-          ),
-        ],
-      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
