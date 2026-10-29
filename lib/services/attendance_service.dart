@@ -115,21 +115,112 @@ class AttendanceService {
   // ---- Employee profile ----------------------------------------------------
 
   /// Called once after SSO login to load the employee profile into prefs.
-  /// Endpoint: GET /api/timeOffice/employee/markattendance/alarm/details/{employeeCode}
-  /// We first try to extract employeeCode from the JWT payload; if that fails
-  /// we try the generic profile endpoint and parse whatever we get.
+  ///
+  /// Strategy (in order):
+  ///  1. Try HROne's own "my profile" endpoints (the ones the HROne web app
+  ///     actually calls after login).
+  ///  2. If any returns an employeeCode, also call alarm/details for full data.
+  ///  3. Try to decode employeeCode from the JWT (works for HROne-issued JWTs,
+  ///     not for Microsoft MSAL tokens).
+  ///  4. Use whatever partial data we have.
   Future<void> fetchAndSaveEmployeeProfile(String token) async {
-    // Try to extract employeeCode from the JWT claims
-    String guessedCode = _extractEmployeeCodeFromJwt(token);
+    // ── Step 1: try real HROne "my profile" endpoints ────────────────────────
+    // These are the actual endpoints HROne's web app calls — ordered by
+    // likelihood of success.
+    final profileEndpoints = [
+      '$_baseUrl/api/employee/selfservice/getemployeeprofile',
+      '$_baseUrl/api/employee/selfservice/profile',
+      '$_baseUrl/api/timeOffice/employee/getMyProfile',
+      '$_baseUrl/api/timeOffice/employee/myProfile',
+      '$_baseUrl/api/employee/profile/me',
+      '$_baseUrl/api/v1/employee/me',
+      '$_baseUrl/api/employee/me',
+      '$_baseUrl/api/v1/employee/profile',
+      '$_baseUrl/api/employee/profile',
+    ];
 
-    // If JWT has a code, hit the alarm/details endpoint
-    if (guessedCode.isNotEmpty) {
-      final saved = await _fetchAlarmDetails(token, guessedCode);
-      if (saved) return;
+    final headers = {
+      'Authorization': 'Bearer $token',
+      'Accept': 'application/json',
+      'Origin': _baseUrl,
+      'Referer': '$_baseUrl/',
+    };
+
+    String codeFromProfile = '';
+
+    for (final url in profileEndpoints) {
+      try {
+        final resp = await http
+            .get(Uri.parse(url), headers: headers)
+            .timeout(const Duration(seconds: 10));
+
+        if (resp.statusCode == 200) {
+          final body = jsonDecode(resp.body);
+          // HROne wraps responses: {success:true, data: {...}} or just {...}
+          final data = _unwrap(body);
+          if (data is Map && data.isNotEmpty) {
+            final saved = _saveProfileFields(data);
+            if (saved) {
+              codeFromProfile = _prefs.getString(PrefKeys.employeeCode) ?? '';
+              break;
+            }
+          }
+        }
+      } catch (_) {}
     }
 
-    // Fallback: try generic profile endpoints to get at least name + email
-    await _fetchGenericProfile(token);
+    // ── Step 2: alarm/details endpoint gives extra attendance-specific info ──
+    final code = codeFromProfile.isNotEmpty
+        ? codeFromProfile
+        : _extractEmployeeCodeFromJwt(token);
+
+    if (code.isNotEmpty) {
+      await _fetchAlarmDetails(token, code, headers);
+    }
+  }
+
+  /// Unwrap HROne's standard response envelope.
+  dynamic _unwrap(dynamic body) {
+    if (body is Map) {
+      // Try {data: {}} or {result: {}} or {response: {}}
+      for (final key in ['data', 'result', 'response', 'employee', 'profile']) {
+        final v = body[key];
+        if (v is Map && v.isNotEmpty) return v;
+        if (v is List && v.isNotEmpty) return v[0];
+      }
+      return body;
+    }
+    if (body is List && body.isNotEmpty) return body[0];
+    return body;
+  }
+
+  /// Saves profile fields from a map; returns true if at least name or empId was saved.
+  bool _saveProfileFields(Map data) {
+    final name = _firstNonEmpty(data, [
+      'employeeName', 'EmployeeName', 'name', 'Name',
+      'displayName', 'DisplayName', 'fullName', 'FullName',
+      'firstName', 'FirstName',
+    ]);
+    final email = _firstNonEmpty(data, [
+      'emailId', 'EmailId', 'email', 'Email',
+      'emailAddress', 'officialEmail', 'workEmail',
+      'personalEmail',
+    ]);
+    final empId = _firstNonEmpty(data, [
+      'employeeId', 'EmployeeId', 'empId', 'EmpId',
+      'id', 'Id', 'employeeID', 'EmployeeID',
+    ]);
+    final empCode = _firstNonEmpty(data, [
+      'employeeCode', 'EmployeeCode', 'empCode', 'EmpCode',
+      'code', 'Code', 'employeeNo', 'EmployeeNo',
+    ]);
+
+    if (name.isNotEmpty) _prefs.setString(PrefKeys.employeeName, name);
+    if (email.isNotEmpty) _prefs.setString(PrefKeys.employeeEmail, email);
+    if (empId.isNotEmpty) _prefs.setString(PrefKeys.employeeId, empId);
+    if (empCode.isNotEmpty) _prefs.setString(PrefKeys.employeeCode, empCode);
+
+    return name.isNotEmpty || empId.isNotEmpty;
   }
 
   String _extractEmployeeCodeFromJwt(String token) {
@@ -137,102 +228,43 @@ class AttendanceService {
       final parts = token.split('.');
       if (parts.length < 2) return '';
       final payload = parts[1];
-      // Base64url decode with padding
       final padded = payload.padRight(
           payload.length + (4 - payload.length % 4) % 4, '=');
       final decoded = utf8.decode(base64Url.decode(padded));
       final map = jsonDecode(decoded) as Map<String, dynamic>;
-      return (map['employeeCode'] ??
+      // HROne-issued JWTs may carry employeeCode directly
+      final code = (map['employeeCode'] ??
               map['employee_code'] ??
               map['EmployeeCode'] ??
-              map['sub'] ??
               '') as String;
+      // Don't use 'sub' — that's the Microsoft OID, not an HROne code
+      return code;
     } catch (_) {
       return '';
     }
   }
 
-  Future<bool> _fetchAlarmDetails(String token, String code) async {
-    final url = '$_baseUrl/api/timeOffice/employee/markattendance/alarm/details/$code';
+  Future<void> _fetchAlarmDetails(
+      String token, String code, Map<String, String> headers) async {
+    final url =
+        '$_baseUrl/api/timeOffice/employee/markattendance/alarm/details/$code';
     try {
-      final resp = await http.get(
-        Uri.parse(url),
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Accept': 'application/json',
-          'Origin': _baseUrl,
-          'Referer': '$_baseUrl/',
-        },
-      ).timeout(const Duration(seconds: 15));
+      final resp = await http
+          .get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 15));
 
       if (resp.statusCode == 200) {
         final body = jsonDecode(resp.body);
-        final data = (body is Map) ? (body['data'] ?? body) : body;
-        if (data is Map) {
-          final name = _firstNonEmpty(data, [
-            'employeeName', 'EmployeeName', 'name', 'Name',
-            'displayName', 'fullName', 'FirstName',
-          ]);
-          final email = _firstNonEmpty(data, [
-            'emailId', 'email', 'Email', 'emailAddress',
-            'officialEmail', 'workEmail',
-          ]);
-          final empId = _firstNonEmpty(data, [
-            'employeeId', 'EmployeeId', 'id', 'Id',
-            'employeeID', 'EmpId',
-          ]);
-          final empCode = _firstNonEmpty(data, [
-            'employeeCode', 'EmployeeCode', 'empCode', 'code',
-          ]);
-          if (name.isNotEmpty) await _prefs.setString(PrefKeys.employeeName, name);
-          if (email.isNotEmpty) await _prefs.setString(PrefKeys.employeeEmail, email);
-          if (empId.isNotEmpty) {
-            await _prefs.setString(PrefKeys.employeeId, empId);
-          }
-          if (empCode.isNotEmpty) {
-            await _prefs.setString(PrefKeys.employeeCode, empCode);
-          } else {
+        final data = _unwrap(body);
+        if (data is Map && data.isNotEmpty) {
+          _saveProfileFields(data);
+          // If no code saved yet, use the one from the URL
+          if ((_prefs.getString(PrefKeys.employeeCode) ?? '').isEmpty) {
             await _prefs.setString(PrefKeys.employeeCode, code);
           }
-          return name.isNotEmpty || empId.isNotEmpty;
         }
       }
     } catch (_) {}
-    return false;
-  }
-
-  Future<void> _fetchGenericProfile(String token) async {
-    final endpoints = [
-      '$_baseUrl/api/employee/profile',
-      '$_baseUrl/api/v1/employee/profile',
-      '$_baseUrl/api/employee/me',
-    ];
-    for (final url in endpoints) {
-      try {
-        final resp = await http.get(
-          Uri.parse(url),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Accept': 'application/json',
-          },
-        ).timeout(const Duration(seconds: 10));
-        if (resp.statusCode == 200) {
-          final body = jsonDecode(resp.body);
-          final data = (body is Map) ? (body['data'] ?? body) : body;
-          if (data is Map) {
-            final name = _firstNonEmpty(data, ['employeeName', 'name', 'displayName', 'fullName']);
-            final email = _firstNonEmpty(data, ['emailId', 'email', 'emailAddress']);
-            final empId = _firstNonEmpty(data, ['employeeId', 'id', 'empId']);
-            final empCode = _firstNonEmpty(data, ['employeeCode', 'empCode', 'code']);
-            if (name.isNotEmpty) await _prefs.setString(PrefKeys.employeeName, name);
-            if (email.isNotEmpty) await _prefs.setString(PrefKeys.employeeEmail, email);
-            if (empId.isNotEmpty) await _prefs.setString(PrefKeys.employeeId, empId);
-            if (empCode.isNotEmpty) await _prefs.setString(PrefKeys.employeeCode, empCode);
-            if (name.isNotEmpty) return; // Got what we need
-          }
-        }
-      } catch (_) {}
-    }
   }
 
   String _firstNonEmpty(Map data, List<String> keys) {

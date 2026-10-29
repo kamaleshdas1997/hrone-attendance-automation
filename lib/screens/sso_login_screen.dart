@@ -238,6 +238,30 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
         return;
       }
 
+      // ── Profile data extracted directly from the page ────────────────────
+      final source = map['source'] as String? ?? '';
+
+      if (source == 'localStorageProfile') {
+        // Got employee profile fields directly from localStorage scan
+        final code  = map['employeeCode']  as String? ?? '';
+        final id    = map['employeeId']    as String? ?? '';
+        final name  = map['employeeName']  as String? ?? '';
+        final email = map['employeeEmail'] as String? ?? '';
+        if (code.isNotEmpty)  widget.prefs.setString(PrefKeys.employeeCode, code);
+        if (id.isNotEmpty)    widget.prefs.setString(PrefKeys.employeeId, id);
+        if (name.isNotEmpty)  widget.prefs.setString(PrefKeys.employeeName, name);
+        if (email.isNotEmpty) widget.prefs.setString(PrefKeys.employeeEmail, email);
+        return;
+      }
+
+      if (source == 'empCode') {
+        final code = map['value'] as String? ?? '';
+        if (code.isNotEmpty) {
+          widget.prefs.setString(PrefKeys.employeeCode, code);
+        }
+        return;
+      }
+
       // ── localStorage / global token messages ─────────────────────────────
       if (_tokenCaptured) return;
       final value = map['value'] as String? ?? '';
@@ -282,44 +306,96 @@ class _SsoLoginScreenState extends State<SsoLoginScreen> {
   // ── Token extraction from localStorage ────────────────────────────────────
 
   Future<void> _tryExtractTokenFromPage(String url) async {
-    if (_tokenCaptured) return;
     if (!url.contains('hrone.cloud')) return;
 
+    // Scan for both the HROne API token AND the employeeCode in the page state
     const js = r'''
 (function() {
-  const keys = ['token','access_token','accessToken','authToken','jwt',
-    'hrone_token','hrone_access_token','Bearer','msal.idtoken'];
-  for (const k of keys) {
-    const v = localStorage.getItem(k) || sessionStorage.getItem(k);
-    if (v && v.length > 20) {
-      FlutterBridge.postMessage(JSON.stringify({source:'storage',key:k,value:v}));
-      return;
+  // ── 1. Look for HROne token in known storage keys ────────────────────────
+  if (!window.__flutterTokenCaptured) {
+    const tokenKeys = ['token','access_token','accessToken','authToken','jwt',
+      'hrone_token','hrone_access_token','Bearer'];
+    for (const k of tokenKeys) {
+      const v = localStorage.getItem(k) || sessionStorage.getItem(k);
+      if (v && v.length > 20) {
+        FlutterBridge.postMessage(JSON.stringify({source:'storage',key:k,value:v}));
+        break;
+      }
+    }
+
+    // Scan all localStorage for JWT-shaped values (3-part dot-separated)
+    const jwtRegex = /^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const v = localStorage.getItem(k);
+      // Skip Microsoft MSAL tokens (they use OID/sub, not employeeCode)
+      if (k && k.includes('msal')) continue;
+      if (v && jwtRegex.test(v)) {
+        FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan',key:k,value:v}));
+        break;
+      }
+    }
+
+    // MSAL accesstoken objects — extract .secret (the actual access token)
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.includes('accesstoken')) {
+        try {
+          const obj = JSON.parse(localStorage.getItem(k));
+          const secret = obj.secret || obj.access_token || obj.token;
+          if (secret && secret.length > 20) {
+            FlutterBridge.postMessage(JSON.stringify({source:'msal',key:k,value:secret}));
+            break;
+          }
+        } catch(_) {}
+      }
     }
   }
-  const jwtRegex = /^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/;
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    const v = localStorage.getItem(k);
-    if (v && jwtRegex.test(v)) {
-      FlutterBridge.postMessage(JSON.stringify({source:'localStorage-scan',key:k,value:v}));
-      return;
+
+  // ── 2. Look for employeeCode in the page's app state ─────────────────────
+  // HROne Angular/React app stores the logged-in user in window or localStorage
+  const empCodeSources = [
+    window.__employeeCode,
+    window.__hroneUser && window.__hroneUser.employeeCode,
+    window.__user && window.__user.employeeCode,
+    window.hroneUser && window.hroneUser.employeeCode,
+  ];
+  for (const v of empCodeSources) {
+    if (v && String(v).trim().length > 0) {
+      FlutterBridge.postMessage(JSON.stringify({source:'empCode',value:String(v).trim()}));
+      break;
     }
   }
+
+  // Also scan localStorage for stored user object with employeeCode
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && k.includes('accesstoken')) {
+    if (!k) continue;
+    const lower = k.toLowerCase();
+    if (lower.includes('user') || lower.includes('employee') || lower.includes('profile')) {
       try {
         const obj = JSON.parse(localStorage.getItem(k));
-        const secret = obj.secret || obj.access_token || obj.token;
-        if (secret && secret.length > 20) {
-          FlutterBridge.postMessage(JSON.stringify({source:'msal',key:k,value:secret}));
-          return;
+        if (obj && typeof obj === 'object') {
+          const code = obj.employeeCode || obj.EmployeeCode || obj.empCode ||
+                       (obj.data && (obj.data.employeeCode || obj.data.EmployeeCode));
+          const id   = obj.employeeId   || obj.EmployeeId   || obj.empId   ||
+                       (obj.data && (obj.data.employeeId   || obj.data.EmployeeId));
+          const name = obj.employeeName || obj.EmployeeName || obj.name ||
+                       (obj.data && (obj.data.employeeName || obj.data.name));
+          const email= obj.email || obj.emailId || obj.Email ||
+                       (obj.data && (obj.data.email || obj.data.emailId));
+          if (code || id || name) {
+            FlutterBridge.postMessage(JSON.stringify({
+              source:'localStorageProfile', key:k,
+              employeeCode: code || '', employeeId: id || '',
+              employeeName: name || '', employeeEmail: email || ''
+            }));
+            break;
+          }
         }
       } catch(_) {}
     }
   }
-  const g = window.__HRONE_TOKEN__ || window.hroneToken || window.authToken;
-  if (g) FlutterBridge.postMessage(JSON.stringify({source:'global',key:'window',value:String(g)}));
 })();
 ''';
     try {

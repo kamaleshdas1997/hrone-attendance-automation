@@ -18,6 +18,21 @@ class _StatusScreenState extends State<StatusScreen> {
 
   AttendanceService get _svc => AttendanceService(widget.prefs);
 
+  @override
+  void initState() {
+    super.initState();
+    // Re-fetch profile silently if name or code is missing (covers first login
+    // where the background fetch may have raced with the WebView closing)
+    final name = widget.prefs.getString(PrefKeys.employeeName) ?? '';
+    final code = widget.prefs.getString(PrefKeys.employeeCode) ?? '';
+    final token = widget.prefs.getString(PrefKeys.authToken) ?? '';
+    if ((name.isEmpty || code.isEmpty) && token.isNotEmpty) {
+      _svc.fetchAndSaveEmployeeProfile(token).then((_) {
+        if (mounted) setState(() {});
+      }).catchError((_) {});
+    }
+  }
+
   Future<void> _manualPunch(String type) async {
     setState(() {
       _manualLoading = true;
